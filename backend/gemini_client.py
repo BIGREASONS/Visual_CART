@@ -34,7 +34,7 @@ class GeminiClient:
         model_name: Optional[str] = None
     ):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY", "")
-        self.model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        self.model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
 
     @property
@@ -218,7 +218,7 @@ class GeminiClient:
                 model = parsed.get("model")
                 specs = parsed.get("specifications") or {}
                 confidence = float(parsed.get("confidence", 0.95))
-                match_reason = parsed.get("match_reason") or f"Gemini 1.5 Flash multimodal recognition ({int(confidence * 100)}% confidence)"
+                match_reason = parsed.get("match_reason") or f"Gemini 2.5 Flash multimodal recognition ({int(confidence * 100)}% confidence)"
 
                 return {
                     "brand": brand,

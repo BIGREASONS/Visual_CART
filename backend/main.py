@@ -125,6 +125,20 @@ async def recognize_product(req: RecognizeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Multimodal recognition failed: {str(e)}")
 
+@app.get("/api/v1/payments/paypal/configuration")
+@app.get("/api/paypal/configuration")
+async def get_configuration():
+    return {
+        "client_id": os.getenv("PAYPAL_CLIENT_ID", "sb-demo-client-id"),
+        "mode": os.getenv("PAYPAL_MODE", "sandbox"),
+        "default_currency": os.getenv("DEFAULT_CURRENCY", "INR"),
+        "brand_name": "PayPal Visual Cart Demo Store",
+        "is_sandbox": os.getenv("PAYPAL_MODE", "sandbox") == "sandbox",
+        "is_live_configured": bool(os.getenv("PAYPAL_CLIENT_ID")),
+        "deep_link_scheme": "paypalvisualcart"
+    }
+
+@app.post("/api/v1/payments/paypal/create-order")
 @app.post("/api/paypal/create-order")
 async def create_paypal_order(req: CreateOrderRequest):
     try:
@@ -142,6 +156,7 @@ async def create_paypal_order(req: CreateOrderRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PayPal order creation failed: {str(e)}")
 
+@app.post("/api/v1/payments/paypal/capture-order")
 @app.post("/api/paypal/capture-order")
 async def capture_paypal_order(req: CaptureOrderRequest):
     try:

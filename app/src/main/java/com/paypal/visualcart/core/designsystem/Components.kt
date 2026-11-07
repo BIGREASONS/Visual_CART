@@ -299,7 +299,7 @@ fun LiveInferenceBadge(
 @Composable
 fun ProductOriginBadge(
     isDemoFixture: Boolean,
-    isLiveInference: Boolean = !isDemoFixture,
+    isLiveInference: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     when {

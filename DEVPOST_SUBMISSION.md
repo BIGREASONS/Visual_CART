@@ -95,7 +95,7 @@ PayPal Visual Cart is engineered using **Clean Architecture** and **MVVM** princ
 - **System Integration**: `ShortcutManagerCompat`, `TileService`, `SYSTEM_ALERT_WINDOW` with Android 14+ `FOREGROUND_SERVICE_SPECIAL_USE`
 
 ### AI Capabilities Stack
-- **Vision Model**: Google Gemini 1.5 Flash Multimodal Vision API (`gemini-1.5-flash`)
+- **Vision Model**: Google Gemini 2.5 Flash / 3.8 Flash Multimodal Vision API (`gemini-2.5-flash`)
 - **Schema Enforcement**: Structured JSON response formatting (`generationConfig.response_mime_type = "application/json"`)
 - **On-Device Fallback**: `LocalProductParser.kt` regex spec parser extracting memory, capacities, form factors, apparel sizing, and brand signatures
 - **Matching & Explainability**: `ProductMatchingEngine.kt` computing weighted attribute alignment scores and natural language justifications

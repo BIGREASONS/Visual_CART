@@ -180,7 +180,7 @@ class MultimodalProductUnderstandingTest {
         val provider = CloudProductUnderstandingProvider(
             apiKey = "AIzaSyFakeGeminiApiKey12345",
             endpointUrl = null,
-            modelName = "gemini-1.5-flash",
+            modelName = "gemini-2.5-flash",
             networkTransport = mockTransport
         )
 
@@ -193,7 +193,7 @@ class MultimodalProductUnderstandingTest {
 
         assertNotNull(recordedUrl)
         assertTrue("URL should hit Google Generative Language API", recordedUrl!!.contains("generativelanguage.googleapis.com"))
-        assertTrue("URL should specify gemini-1.5-flash", recordedUrl!!.contains("gemini-1.5-flash"))
+        assertTrue("URL should specify gemini-2.5-flash", recordedUrl!!.contains("gemini-2.5-flash"))
         assertTrue("URL should contain api key parameter", recordedUrl!!.contains("key=AIzaSyFakeGeminiApiKey12345"))
 
         assertNotNull(recordedBody)

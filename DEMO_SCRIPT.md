@@ -13,7 +13,7 @@
 | :---: | :---: | :---: | :--- | :--- |
 | **1** | `0:00 - 0:25` | 25s | **The Problem: Cart Fragmentation** | Modern shoppers discover items across social apps, leading to fragmented carts, lost intent, and 70% abandonment. |
 | **2** | `0:25 - 0:50` | 25s | **Visual Capture: Zero-Friction Ingestion** | Google Circle to Search / Direct Share & Quick Settings Floating Bubble capture products from any app in 1 tap. |
-| **3** | `0:50 - 1:20` | 30s | **Multimodal AI Understanding** | Gemini 1.5 Flash extracts canonical title, model, and specs (Crucial P3 Plus 1TB NVMe M.2 2280) with confidence scoring. |
+| **3** | `0:50 - 1:20` | 30s | **Multimodal AI Understanding** | Google Gemini 2.5 Flash extracts canonical title, model, and specs (Crucial P3 Plus 1TB NVMe M.2 2280) with confidence scoring. |
 | **4** | `1:20 - 1:55` | 35s | **Multi-Merchant Discovery & Comparison** | Instant cross-store price comparison (Amazon ₹6,099 vs Flipkart ₹5,499 vs Croma ₹5,799) highlighting ₹600 savings. |
 | **5** | `1:55 - 2:25` | 30s | **Seamless PayPal Checkout** | 1-Click PayPal Sandbox Checkout with itemized GST breakdown (18%) and PayPal Buyer Protection guarantee. |
 | **6** | `2:25 - 2:40` | 15s | **Universal Cart Value & Outro** | Persistent unified cart, 30-day price drop tracking, and closing tagline: *"See it. Save it. Find it. Pay with PayPal."* |
@@ -65,13 +65,13 @@
     - Extracted Specification Tags: `[1TB]` `[PCIe 4.0]` `[NVMe 1.4]` `[M.2 2280]` `[Up to 5,000 MB/s]`
   - Green pill badge in the upper right corner glows: **"EXACT MATCH · 96% CONFIDENCE"**.
   - A small expandable card reveals the AI explanation: *"Brand, storage capacity (1TB), and PCIe 4.0 interface match exact hardware specifications."*
-  - Quick animated graphic illustrating the Google Gemini 1.5 Flash structured JSON schema pipeline with local regex fallback.
+  - Quick animated graphic illustrating the Google Gemini 2.5 Flash structured JSON schema pipeline with local regex fallback.
 - **On-Screen Text**:
-  - *"Multimodal AI Vision Pipeline (Google Gemini 1.5 Flash)"*
+  - *"Multimodal AI Vision Pipeline (Google Gemini 2.5 Flash)"*
   - *"Exact Spec Parsing: 1TB · PCIe 4.0 · NVMe M.2 2280"*
   - *"Zero Downtime: Dual-Tier On-Device Fallback Engine"*
 - **Voiceover**:
-  > *"Under the hood, Google Gemini 1.5 Flash analyzes the image and text context, extracting a strict canonical product specification. It doesn't just recognize a generic hard drive; it disambiguates the exact model: Crucial P3 Plus, one terabyte, PCIe 4.0, NVMe M.2 2280, with a ninety-six percent confidence score. And if you're offline or have low bandwidth, our on-device heuristic engine takes over with zero downtime."*
+  > *"Under the hood, Google Gemini 2.5 Flash analyzes the image and text context, extracting a strict canonical product specification. It doesn't just recognize a generic hard drive; it disambiguates the exact model: Crucial P3 Plus, one terabyte, PCIe 4.0, NVMe M.2 2280, with a ninety-six percent confidence score. And if you're offline or have low bandwidth, our on-device heuristic engine takes over with zero downtime."*
 - **Audio Cue**: High-tech data confirmation tone.
 
 ---

@@ -130,7 +130,7 @@ PayPal Visual Cart is built using **Clean Architecture** and **MVVM** principles
 ## 3. Product Recognition & Matching Engine
 
 - **Cloud Multimodal Vision (`CloudProductUnderstandingProvider.kt`)**:
-  - Leverages Google Gemini 1.5 Flash (`gemini-1.5-flash`) via structured JSON schema output (`generationConfig.response_mime_type = "application/json"`).
+  - Leverages Google Gemini Multimodal Vision (`gemini-2.5-flash` default, configurable to `gemini-3.8-flash`) via structured JSON schema output (`generationConfig.response_mime_type = "application/json"`).
   - Extracts canonical title, brand, category, and technical hardware specifications without conversational filler.
 - **On-Device Spec Parser (`LocalProductParser.kt`)**:
   - Regex pattern matching for electronic capacities (e.g., `1TB`, `512GB`, `2TB`), memory types (`NVMe`, `PCIe 4.0`, `M.2 2280`), RAM, form factors, apparel sizes (`UK 9`, `US 10`), and model numbers.

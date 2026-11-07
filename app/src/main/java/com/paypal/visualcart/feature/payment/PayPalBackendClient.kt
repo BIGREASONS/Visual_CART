@@ -55,10 +55,11 @@ open class PayPalBackendClient(
     private val readTimeoutMs: Int = 4000
 ) {
 
-    val baseUrl: String by lazy {
-        configuredBaseUrl?.takeIf { it.isNotBlank() }
-            ?: resolveBaseUrl()
-    }
+    @Volatile
+    private var detectedBaseUrl: String? = null
+
+    val baseUrl: String
+        get() = detectedBaseUrl ?: configuredBaseUrl?.takeIf { it.isNotBlank() } ?: resolveBaseUrl()
 
     companion object {
         const val DEFAULT_EMULATOR_URL = "http://10.0.2.2:8000"
@@ -77,10 +78,24 @@ open class PayPalBackendClient(
 
     /**
      * Checks if the backend server is reachable and responding.
+     * Automatically adapts between Android emulator (10.0.2.2) and physical USB device (localhost via adb reverse).
      */
     open fun isBackendAvailable(): Boolean {
+        val candidate = configuredBaseUrl?.takeIf { it.isNotBlank() } ?: resolveBaseUrl()
+        if (checkHealth(candidate)) {
+            detectedBaseUrl = candidate
+            return true
+        }
+        if (candidate == DEFAULT_EMULATOR_URL && checkHealth(DEFAULT_LOCALHOST_URL)) {
+            detectedBaseUrl = DEFAULT_LOCALHOST_URL
+            return true
+        }
+        return false
+    }
+
+    private fun checkHealth(targetUrl: String): Boolean {
         return try {
-            val url = URL("$baseUrl/health")
+            val url = URL("$targetUrl/health")
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 1500
@@ -88,21 +103,7 @@ open class PayPalBackendClient(
             }
             conn.responseCode in 200..299
         } catch (_: Exception) {
-            // Also test localhost fallback if default was 10.0.2.2 and on JVM
-            if (baseUrl == DEFAULT_EMULATOR_URL) {
-                try {
-                    val localConn = (URL("$DEFAULT_LOCALHOST_URL/health").openConnection() as HttpURLConnection).apply {
-                        requestMethod = "GET"
-                        connectTimeout = 1000
-                        readTimeout = 1000
-                    }
-                    localConn.responseCode in 200..299
-                } catch (_: Exception) {
-                    false
-                }
-            } else {
-                false
-            }
+            false
         }
     }
 

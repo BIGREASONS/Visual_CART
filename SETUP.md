@@ -47,7 +47,7 @@ PAYPAL_BASE_URL=https://api-m.sandbox.paypal.com
 
 # Google Gemini Multimodal Vision API (Optional)
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-1.5-flash
+GEMINI_MODEL=gemini-2.5-flash
 
 # Backend Host & Port
 BACKEND_HOST=0.0.0.0
@@ -55,11 +55,14 @@ BACKEND_PORT=8000
 CORS_ORIGINS=*
 
 # Android Client Endpoint Configuration
-VISUAL_CART_AI_ENDPOINT=http://10.0.2.2:8000/api/ai/recognize
-VISUAL_CART_PAYPAL_ENDPOINT=http://10.0.2.2:8000/api/paypal
+VISUAL_CART_AI_ENDPOINT=http://10.0.2.2:8000/api/v1/ai/recognize-product
+PAYPAL_BACKEND_URL=http://10.0.2.2:8000
 ```
 
-> **Note for Emulator Users**: In the Android emulator, `10.0.2.2` automatically routes to your host machine's `127.0.0.1`.
+> **Physical Phone Connectivity (USB or Wi-Fi)**:
+> - **Over USB with ADB (Recommended)**: Run `adb reverse tcp:8000 tcp:8000`. This maps the laptop's port 8000 directly to `localhost:8000` on the phone. Visual Cart's `PayPalBackendClient` automatically detects and uses this!
+> - **Over Local Wi-Fi**: Start the server with `--host 0.0.0.0`. In your terminal run `ipconfig` to find your laptop's IPv4 address (e.g. `192.168.1.150`). Visual Cart accepts `PAYPAL_BACKEND_URL=http://192.168.1.150:8000`.
+> - **In Android Studio Emulator**: `http://10.0.2.2:8000` routes automatically to your host machine's `127.0.0.1:8000`.
 
 ---
 
@@ -84,10 +87,11 @@ python -m venv venv
 pip install -r backend/requirements.txt
 ```
 
-### Step 3.3: Start the Backend Server
+### Step 3.3: Start the Unified Backend Server
 ```powershell
 uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+*(Or alternatively: `uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload`)*
 
 ### Step 3.4: Verify Server Health
 Open your web browser or run:
@@ -100,7 +104,7 @@ Expected output:
   "status": "healthy",
   "environment": "sandbox",
   "paypal_base_url": "https://api-m.sandbox.paypal.com",
-  "gemini_model": "gemini-1.5-flash"
+  "gemini_model": "gemini-2.5-flash"
 }
 ```
 

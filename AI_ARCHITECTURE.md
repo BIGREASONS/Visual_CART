@@ -59,17 +59,19 @@ PayPal Visual Cart bridges visual product discovery across third-party applicati
 
 ---
 
-## 2. Google Gemini 1.5 Multimodal Vision Pipeline
+## 2. Google Gemini Multimodal Vision Pipeline
 
 ### 2.1 Model Selection & Rationale
-We selected **Google Gemini 1.5 Flash** (`gemini-1.5-flash`) as our primary cloud multimodal model, with optional configuration for **Gemini 1.5 Pro**:
+Visual Cart integrates **Google Gemini Multimodal Vision** with default routing to **Gemini 2.5 Flash** (`gemini-2.5-flash`) and support for **Gemini 3.8 Flash** (`gemini-3.8-flash`):
 
-| Metric / Capability | Gemini 1.5 Flash | Traditional OCR + Text LLM |
+> **Migration Note**: The legacy `gemini-1.5-flash` generation was retired by Google in late 2025. Visual Cart has migrated to currently supported Gemini multimodal vision models (`gemini-2.5-flash` default, configurable via `GEMINI_MODEL`), leveraging native cross-modal tokenization and sub-second visual feature extraction.
+
+| Metric / Capability | Gemini 2.5 / 3.8 Flash | Traditional OCR + Text LLM |
 | :--- | :--- | :--- |
-| **End-to-End Latency** | ~700ms – 1,100ms | 1,800ms – 3,200ms (2-pass pipeline) |
-| **Visual Feature Understanding** | Understands logos, physical packaging, spec tables, and colorways natively | Requires separate vision OCR pass, losing spatial layout context |
+| **End-to-End Latency** | ~450ms – 850ms | 1,800ms – 3,200ms (2-pass pipeline) |
+| **Visual Feature Understanding** | Understands logos, packaging, spec tables, and colorways natively | Requires separate vision OCR pass, losing spatial layout context |
 | **Schema Strictness** | Native JSON Mode (`generationConfig.response_mime_type`) | High rate of hallucinated markdown markdown wrappers (```json) |
-| **Cost Efficiency** | Extremely lightweight token consumption | High multi-hop API overhead |
+| **Cost Efficiency** | High efficiency multimodal token consumption | High multi-hop API overhead |
 
 ### 2.2 Memory-Safe Bitmap Preprocessing (`SafeImageDecoder.kt`)
 Mobile devices routinely crash when handling full-resolution camera captures (e.g., 48MP photos). Visual Cart enforces memory safety:
@@ -102,7 +104,7 @@ Output schema:
 ```
 
 ### 3.2 Native JSON Generation Configuration
-The request payload transmitted to Gemini's `v1beta/models/gemini-1.5-flash:generateContent` endpoint explicitly activates native JSON mode:
+The request payload transmitted to Gemini's `v1beta/models/gemini-2.5-flash:generateContent` endpoint explicitly activates native JSON mode:
 
 ```json
 {

@@ -81,8 +81,8 @@ class CloudProductUnderstandingProvider(
 ) : ProductUnderstandingProvider {
 
     companion object {
-        const val PROVIDER_NAME = "PayPal Cloud Multimodal AI (Gemini 1.5 / Proxy)"
-        const val DEFAULT_MODEL = "gemini-1.5-flash"
+        const val PROVIDER_NAME = "PayPal Cloud Multimodal AI (Gemini 2.5 / Proxy)"
+        const val DEFAULT_MODEL = "gemini-2.5-flash"
         const val BACKEND_PROXY_PATH = "/api/v1/ai/recognize-product"
 
         private const val ENV_GEMINI_KEY = "GEMINI_API_KEY"

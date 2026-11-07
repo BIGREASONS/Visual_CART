@@ -272,6 +272,7 @@ def calculate_order_breakdown(req: CreateOrderRequest) -> OrderSummaryResponse:
 # ============================================================================
 
 @app.get("/api/v1/payments/paypal/configuration", response_model=ConfigResponse)
+@app.get("/api/paypal/configuration", response_model=ConfigResponse)
 async def get_configuration():
     """
     Returns public PayPal configuration safely without ever exposing the client secret.
@@ -290,6 +291,7 @@ async def get_configuration():
 
 
 @app.post("/api/v1/payments/paypal/create-order", response_model=CreateOrderResponse)
+@app.post("/api/paypal/create-order", response_model=CreateOrderResponse)
 async def create_paypal_order(req: CreateOrderRequest, request: Request):
     """
     Path 1 (PayPal sandbox demo checkout):
@@ -439,6 +441,7 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
 
 
 @app.post("/api/v1/payments/paypal/capture-order", response_model=CaptureOrderResponse)
+@app.post("/api/paypal/capture-order", response_model=CaptureOrderResponse)
 async def capture_paypal_order(req: CaptureOrderRequest):
     """
     Captures payment for an approved PayPal order via POST /v2/checkout/orders/{id}/capture.
@@ -655,9 +658,10 @@ async def recognize_product(req: RecognizeProductRequest):
     Proxies product visual recognition and text understanding to Google Gemini 1.5 Flash.
     If GEMINI_API_KEY is not configured, provides deterministic parsing of hint_text.
     """
-    # 1. If Gemini API key is configured, invoke Gemini 1.5 Flash
+    # 1. If Gemini API key is configured, invoke Gemini multimodal model (gemini-2.5-flash)
     if GEMINI_API_KEY:
-        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={GEMINI_API_KEY}"
 
         prompt = (
             "You are an e-commerce product recognition engine for PayPal Visual Cart. "
