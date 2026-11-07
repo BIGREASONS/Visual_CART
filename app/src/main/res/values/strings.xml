@@ -1,0 +1,26 @@
+<resources>
+    <string name="app_name">Visual Cart</string>
+    <string name="tile_label">VISUAL CART</string>
+    <string name="tile_description">Toggle Visual Cart floating button</string>
+    <string name="overlay_notification_channel_name">Visual Cart Overlay</string>
+    <string name="overlay_notification_channel_description">Persistent indicator when Visual Cart floating overlay is active</string>
+    <string name="overlay_notification_title">Visual Cart active</string>
+    <string name="overlay_notification_text">Tap floating cart to save products from anywhere</string>
+    <string name="action_turn_off">Turn off</string>
+    <string name="action_add_screenshot">Add from screenshot</string>
+    <string name="action_paste_link">Paste product link</string>
+    <string name="action_open_cart">Open my cart</string>
+    <string name="action_hide_overlay">Hide floating button</string>
+    <string name="overlay_permission_dialog_title">Overlay Permission Required</string>
+    <string name="overlay_permission_dialog_message">Visual Cart needs permission to appear on top of other apps so you can save products anywhere.</string>
+    <string name="overlay_permission_grant">Grant Permission</string>
+    <string name="overlay_permission_cancel">Cancel</string>
+    <string name="share_target_label">Add to Visual Cart</string>
+    <string name="finding_product">Finding your product…</string>
+    <string name="analyzing_visual_features">Analyzing visual features and identifying merchant listings…</string>
+    <string name="best_price_found">Best price found</string>
+    <string name="add_to_cart_action">Add to Visual Cart</string>
+    <string name="saved_to_visual_cart">Saved to your Visual Cart!</string>
+    <string name="view_in_cart">View in Cart</string>
+    <string name="done_action">Done</string>
+</resources>

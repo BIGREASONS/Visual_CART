@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Handle Accent (Terracotta) -->
+    <path
+        android:pathData="M 26,38 H 33"
+        android:strokeColor="#C97858"
+        android:strokeWidth="3.6"
+        android:strokeLineCap="round" />
+
+    <!-- Cart Spine & Slanted Strut -->
+    <path
+        android:pathData="M 33,38 L 40,68"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Bottom Chassis Runner -->
+    <path
+        android:pathData="M 40,68 C 36,68 34,71 34,75 C 34,78.5 37.5,79.5 42,79.5 H 71 C 74.5,79.5 76,77 76,74"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Basket Trapezoid -->
+    <path
+        android:pathData="M 41,45 H 67 L 64,66 H 41 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Camera Viewfinder Corner Reticle (Top-Right) -->
+    <path
+        android:pathData="M 65,37 H 75 V 47"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Camera Viewfinder Corner Reticle (Bottom-Right) -->
+    <path
+        android:pathData="M 75,59 V 69 H 65"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Center Vision Aperture Dot -->
+    <path
+        android:pathData="M 54,52 A 3.2,3.2 0 1,1 54,58.4 A 3.2,3.2 0 1,1 54,52"
+        android:fillColor="#C97858" />
+
+    <!-- Front Wheel (Terracotta) -->
+    <path
+        android:pathData="M 43,82 A 4.2,4.2 0 1,1 43,90.4 A 4.2,4.2 0 1,1 43,82"
+        android:fillColor="#C97858" />
+
+    <!-- Rear Wheel (Sage) -->
+    <path
+        android:pathData="M 66,82 A 4.2,4.2 0 1,1 66,90.4 A 4.2,4.2 0 1,1 66,82"
+        android:fillColor="#A6B5A0" />
+
+</vector>

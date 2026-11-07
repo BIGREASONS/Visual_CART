@@ -1,0 +1,59 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="28dp"
+    android:height="28dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- Handle Accent (Terracotta) -->
+    <path
+        android:pathData="M 3,6 H 5"
+        android:strokeColor="#C97858"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round" />
+
+    <!-- Cart Spine & Chassis Runner -->
+    <path
+        android:pathData="M 5,6 L 7,15.5 C 5.8,15.5 5.4,16.5 5.4,17.4 C 5.4,18.4 6.3,18.8 7.5,18.8 H 17.5"
+        android:strokeColor="#FFFFF0"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Basket -->
+    <path
+        android:pathData="M 7.2,8.5 H 15.5 L 14.5,14.8 H 7.2 Z"
+        android:strokeColor="#FFFFF0"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Viewfinder Reticles (Visual scanning) -->
+    <path
+        android:pathData="M 15,5.5 H 18.5 V 9"
+        android:strokeColor="#FFFFF0"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <path
+        android:pathData="M 18.5,13.5 V 16.5 H 15"
+        android:strokeColor="#FFFFF0"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Center Vision Aperture Dot -->
+    <path
+        android:pathData="M 11,10.5 A 1.2,1.2 0 1,1 11,12.9 A 1.2,1.2 0 1,1 11,10.5"
+        android:fillColor="#C97858" />
+
+    <!-- Wheels -->
+    <path
+        android:pathData="M 8,19.8 A 1.4,1.4 0 1,1 8,22.6 A 1.4,1.4 0 1,1 8,19.8"
+        android:fillColor="#C97858" />
+
+    <path
+        android:pathData="M 15,19.8 A 1.4,1.4 0 1,1 15,22.6 A 1.4,1.4 0 1,1 15,19.8"
+        android:fillColor="#A6B5A0" />
+
+</vector>

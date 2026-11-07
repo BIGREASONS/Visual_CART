@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <share-target android:targetClass="com.paypal.visualcart.ui.share.VisualCartShareActivity">
+        <data android:mimeType="image/*" />
+        <data android:mimeType="text/plain" />
+        <data android:mimeType="text/*" />
+        <category android:name="com.paypal.visualcart.category.DIRECT_SHARE_TARGET" />
+    </share-target>
+</shortcuts>
