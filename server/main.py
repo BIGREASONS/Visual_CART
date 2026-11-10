@@ -442,26 +442,31 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
 
 @app.post("/api/v1/payments/paypal/capture-order", response_model=CaptureOrderResponse)
 @app.post("/api/paypal/capture-order", response_model=CaptureOrderResponse)
-async def capture_paypal_order(req: CaptureOrderRequest):
+async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
     """
     Captures payment for an approved PayPal order via POST /v2/checkout/orders/{id}/capture.
     Verifies COMPLETED status and returns verified transaction details.
+    Supports negative testing simulation via PayPal-Mock-Response header.
     """
     order_id = req.order_id.strip()
 
     # If it's a live sandbox order
     if has_live_paypal_credentials() and not order_id.startswith("SBX-"):
         token = await get_paypal_access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
+        mock_header = request.headers.get("PayPal-Mock-Response") or request.headers.get("paypal-mock-response")
+        if mock_header:
+            headers["PayPal-Mock-Response"] = mock_header
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
                 response = await client.post(
                     f"{PAYPAL_BASE_URL}/v2/checkout/orders/{order_id}/capture",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                        "Prefer": "return=representation",
-                    },
+                    headers=headers,
                     json={},
                 )
                 response.raise_for_status()
@@ -506,10 +511,20 @@ async def capture_paypal_order(req: CaptureOrderRequest):
                     raw_details=data,
                 )
             except httpx.HTTPStatusError as e:
-                logger.error(f"PayPal capture-order HTTP error {e.response.status_code}: {e.response.text}")
+                # Parse official PayPal error envelope (debug_id, details, issue)
+                try:
+                    error_json = e.response.json()
+                    debug_id = error_json.get("debug_id")
+                    details = error_json.get("details", [])
+                    issue = details[0].get("issue") if details else error_json.get("name", "PAYPAL_ERROR")
+                    desc = details[0].get("description") if details else error_json.get("message", e.response.text)
+                    logger.error(f"PayPal capture HTTP error: issue={issue}, debug_id={debug_id}, desc={desc}")
+                    error_detail = f"PayPal error [{issue}] (debug_id: {debug_id}): {desc}"
+                except Exception:
+                    error_detail = f"PayPal Capture API error: {e.response.text}"
                 raise HTTPException(
                     status_code=e.response.status_code,
-                    detail=f"PayPal Capture API error: {e.response.text}",
+                    detail=error_detail,
                 )
             except Exception as e:
                 logger.error(f"PayPal capture-order error: {str(e)}")

@@ -116,11 +116,13 @@ class PayPalClient:
     async def capture_order(
         self,
         order_id: str,
-        idempotency_key: Optional[str] = None
+        idempotency_key: Optional[str] = None,
+        mock_response: Optional[str] = None
     ) -> Dict[str, Any]:
         """Captures an approved PayPal order (POST /v2/checkout/orders/{id}/capture).
         
         Guarantees payment idempotency and prevents double captures on the same order.
+        Supports negative testing simulation via PayPal-Mock-Response header.
         """
         if not order_id or not order_id.strip():
             raise ValueError("Order ID cannot be blank")
@@ -178,11 +180,27 @@ class PayPalClient:
         if idempotency_key:
             headers["PayPal-Request-Id"] = idempotency_key
 
+        effective_mock = mock_response or os.getenv("PAYPAL_MOCK_RESPONSE")
+        if effective_mock:
+            headers["PayPal-Mock-Response"] = effective_mock
+
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(f"{self.base_url}/v2/checkout/orders/{clean_order_id}/capture", headers=headers, json={})
-            resp.raise_for_status()
-            result = resp.json()
-            self._captured_orders[clean_order_id] = result
-            if idempotency_key:
-                self._idempotency_records[idempotency_key] = result
-            return result
+            try:
+                resp = await client.post(f"{self.base_url}/v2/checkout/orders/{clean_order_id}/capture", headers=headers, json={})
+                resp.raise_for_status()
+                result = resp.json()
+                self._captured_orders[clean_order_id] = result
+                if idempotency_key:
+                    self._idempotency_records[idempotency_key] = result
+                return result
+            except httpx.HTTPStatusError as e:
+                # Parse PayPal's official error envelope for debug_id and issue tracking
+                try:
+                    error_json = e.response.json()
+                    debug_id = error_json.get("debug_id")
+                    details = error_json.get("details", [])
+                    issue = details[0].get("issue") if details else error_json.get("name", "PAYPAL_ERROR")
+                    desc = details[0].get("description") if details else error_json.get("message", e.response.text)
+                    raise RuntimeError(f"PayPal capture error [{issue}] (debug_id: {debug_id}): {desc}") from e
+                except (ValueError, KeyError):
+                    raise RuntimeError(f"PayPal capture failed: {e.response.text}") from e
