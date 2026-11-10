@@ -78,6 +78,7 @@ import com.paypal.visualcart.domain.model.AvailabilityStatus
 import com.paypal.visualcart.domain.model.MatchType
 import com.paypal.visualcart.domain.model.MerchantListing
 import com.paypal.visualcart.domain.model.SourceType
+import com.paypal.visualcart.feature.payment.PayPalCheckoutCoordinator
 
 @Composable
 fun ProductDetailScreen(
@@ -86,7 +87,6 @@ fun ProductDetailScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var showCheckoutDialog by remember { mutableStateOf(false) }
 
     val canonicalSpecs = remember {
         listOf(
@@ -353,10 +353,28 @@ fun ProductDetailScreen(
 
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        // PayPal 1-Click Simulation Button
+                        // PayPal 1-Click Sandbox Checkout Button
                         VisualCartButton(
                             text = "Checkout with PayPal · ₹5,499",
-                            onClick = { showCheckoutDialog = true },
+                            onClick = {
+                                val listing = MerchantListing(
+                                    id = "flipkart_crucial_p3_1tb",
+                                    merchantName = "Flipkart",
+                                    merchantDomain = "flipkart.com",
+                                    title = "Crucial P3 Plus 1TB PCIe 4.0 3D NAND NVMe M.2 SSD",
+                                    price = 5499.0,
+                                    originalPrice = 6099.0,
+                                    currency = "INR",
+                                    productUrl = "https://www.flipkart.com",
+                                    imageUrl = "",
+                                    matchType = MatchType.EXACT,
+                                    confidence = 0.96f,
+                                    availability = AvailabilityStatus.IN_STOCK,
+                                    sourceType = SourceType.DEMO,
+                                    lastVerifiedAt = System.currentTimeMillis()
+                                )
+                                PayPalCheckoutCoordinator.instance.startCheckout(context, listing)
+                            },
                             variant = ButtonVariant.PRIMARY,
                             icon = VisualCartIcons.ShieldCheck,
                             modifier = Modifier.fillMaxWidth()
@@ -702,83 +720,6 @@ fun ProductDetailScreen(
             }
 
             Spacer(modifier = Modifier.height(40.dp))
-        }
-
-        // PayPal Simulated Checkout Modal
-        if (showCheckoutDialog) {
-            AlertDialog(
-                onDismissRequest = { showCheckoutDialog = false },
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = VisualCartIcons.ShieldCheck,
-                            contentDescription = null,
-                            tint = ForestGreen,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "PayPal Quick Checkout",
-                            style = VisualCartTypography.titleLarge.copy(fontWeight = FontWeight.Bold)
-                        )
-                    }
-                },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            text = "Verified Order Summary:",
-                            style = VisualCartTypography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = MutedSlate
-                            )
-                        )
-                        Text(
-                            text = "Crucial P3 Plus 1TB PCIe 4.0 SSD",
-                            style = VisualCartTypography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(text = "Merchant:", style = VisualCartTypography.bodySmall)
-                            Text(text = "Flipkart India", style = VisualCartTypography.bodySmall.copy(fontWeight = FontWeight.Bold))
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(text = "Total Price:", style = VisualCartTypography.bodySmall)
-                            Text(text = "₹5,499", style = VisualCartTypography.titleMedium.copy(fontWeight = FontWeight.Bold, color = ForestGreen))
-                        }
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(1.dp)
-                                .background(Stone)
-                        )
-                        Text(
-                            text = "Simulated PayPal transaction completed with Buyer Protection guarantee.",
-                            style = VisualCartTypography.bodySmall.copy(color = MutedSlate)
-                        )
-                    }
-                },
-                confirmButton = {
-                    VisualCartButton(
-                        text = "Complete Payment (Demo)",
-                        onClick = { showCheckoutDialog = false },
-                        variant = ButtonVariant.PRIMARY
-                    )
-                },
-                dismissButton = {
-                    VisualCartButton(
-                        text = "Cancel",
-                        onClick = { showCheckoutDialog = false },
-                        variant = ButtonVariant.GHOST
-                    )
-                },
-                containerColor = PureWhite,
-                shape = RoundedCornerShape(18.dp)
-            )
         }
     }
 }

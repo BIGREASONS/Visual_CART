@@ -8,15 +8,23 @@ Provides unified gateway endpoints for:
 
 import os
 from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
+from pathlib import Path
 from dotenv import load_dotenv
 
-from .paypal_client import PayPalClient
-from .gemini_client import GeminiClient
-
+# Load local backend/.env or root .env
+_backend_dir = Path(__file__).resolve().parent
+_root_dir = _backend_dir.parent
+if (_backend_dir / ".env").exists():
+    load_dotenv(_backend_dir / ".env")
+if (_root_dir / ".env").exists():
+    load_dotenv(_root_dir / ".env")
 load_dotenv()
+
+from .paypal_client import PayPalClient, PayPalError
+from .gemini_client import GeminiClient
 
 app = FastAPI(
     title="PayPal Visual Cart Gateway API",
@@ -47,15 +55,23 @@ class RecognizeRequest(BaseModel):
     model: Optional[str] = Field(default=None, description="Requested Gemini model")
 
 class CreateOrderRequest(BaseModel):
-    amount_value: str = Field(default="5499.00", description="Total order amount")
-    currency_code: str = Field(default="USD", description="Currency (USD/INR/EUR)")
+    amount_value: Optional[str] = Field(default="64.88", description="Total order amount")
+    currency_code: str = Field(default="USD", description="Currency (USD/EUR/GBP/etc.)")
     item_name: str = Field(default="Visual Cart Item", description="Item description")
+    quantity: int = Field(default=1, ge=1, description="Product quantity")
+    unit_price: Optional[float] = Field(default=None, gt=0, description="Unit base price")
+    tax_rate: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Configurable tax rate")
+    shipping_fee: Optional[float] = Field(default=None, ge=0.0, description="Shipping fee")
     return_url: str = Field(default="https://visualcart.paypal.com/checkout/return")
     cancel_url: str = Field(default="https://visualcart.paypal.com/checkout/cancel")
+    invoice_id: Optional[str] = Field(default=None, description="Optional merchant invoice ID")
+    mock_response: Optional[str] = Field(default=None, description="Mock response header for sandbox negative testing")
 
     @field_validator("amount_value")
     @classmethod
-    def validate_amount(cls, v: str) -> str:
+    def validate_amount(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
         clean = v.strip()
         try:
             val = float(clean)
@@ -68,6 +84,7 @@ class CreateOrderRequest(BaseModel):
 class CaptureOrderRequest(BaseModel):
     order_id: str = Field(min_length=3, max_length=128, description="PayPal order ID returned from create-order")
     idempotency_key: Optional[str] = Field(default=None, max_length=128, description="Client idempotency key")
+    mock_response: Optional[str] = Field(default=None, description="Mock response header for sandbox negative testing")
 
 @app.get("/")
 def read_root():
@@ -128,48 +145,122 @@ async def recognize_product(req: RecognizeRequest):
 @app.get("/api/v1/payments/paypal/configuration")
 @app.get("/api/paypal/configuration")
 async def get_configuration():
+    configured = paypal_client.is_configured
+    mode = os.getenv("PAYPAL_MODE", os.getenv("PAYPAL_ENV", "sandbox")).strip().lower()
+    cid = (paypal_client.client_id or os.getenv("PAYPAL_CLIENT_ID", "")).strip()
+    currency = os.getenv("PAYPAL_CURRENCY", os.getenv("DEFAULT_CURRENCY", "USD")).strip().upper()
+
     return {
-        "client_id": os.getenv("PAYPAL_CLIENT_ID", "sb-demo-client-id"),
-        "mode": os.getenv("PAYPAL_MODE", "sandbox"),
-        "default_currency": os.getenv("DEFAULT_CURRENCY", "INR"),
+        "provider": "paypal",
+        "mode": mode,
+        "credentials_configured": configured,
+        "oauth_ready": configured,
+        "orders_api_ready": configured,
+        "client_id": cid if configured else "sb-demo-client-id",
+        "default_currency": currency,
         "brand_name": "PayPal Visual Cart Demo Store",
-        "is_sandbox": os.getenv("PAYPAL_MODE", "sandbox") == "sandbox",
-        "is_live_configured": bool(os.getenv("PAYPAL_CLIENT_ID")),
-        "deep_link_scheme": "paypalvisualcart"
+        "is_sandbox": mode == "sandbox",
+        "is_live_configured": configured,
+        "deep_link_scheme": "paypalvisualcart",
     }
 
 @app.post("/api/v1/payments/paypal/create-order")
 @app.post("/api/paypal/create-order")
-async def create_paypal_order(req: CreateOrderRequest):
+async def create_paypal_order(req: CreateOrderRequest, request: Request):
+    mock_header = (
+        request.headers.get("PayPal-Mock-Response")
+        or request.headers.get("paypal-mock-response")
+        or req.mock_response
+    )
+    mode = os.getenv("PAYPAL_MODE", os.getenv("PAYPAL_ENV", "sandbox")).strip().lower()
+    if mock_header and mode != "sandbox":
+        raise HTTPException(
+            status_code=400,
+            detail="PayPal-Mock-Response header is strictly forbidden when PAYPAL_MODE is not 'sandbox'"
+        )
+
     try:
         order = await paypal_client.create_order(
             amount_value=req.amount_value,
             currency_code=req.currency_code,
             item_name=req.item_name,
             return_url=req.return_url,
-            cancel_url=req.cancel_url
+            cancel_url=req.cancel_url,
+            quantity=req.quantity,
+            unit_price=req.unit_price,
+            tax_rate=req.tax_rate,
+            shipping_fee=req.shipping_fee,
+            invoice_id=req.invoice_id,
+            mock_response=mock_header,
         )
         return {
             "status": "success",
             "order": order
         }
+    except PayPalError as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=f"PayPal error [{e.issue}] (debug_id: {e.debug_id}): {e.description}"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PayPal order creation failed: {str(e)}")
 
 @app.post("/api/v1/payments/paypal/capture-order")
 @app.post("/api/paypal/capture-order")
-async def capture_paypal_order(req: CaptureOrderRequest):
+async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
+    mock_header = (
+        request.headers.get("PayPal-Mock-Response")
+        or request.headers.get("paypal-mock-response")
+        or req.mock_response
+    )
+    mode = os.getenv("PAYPAL_MODE", os.getenv("PAYPAL_ENV", "sandbox")).strip().lower()
+    if mock_header and mode != "sandbox":
+        raise HTTPException(
+            status_code=400,
+            detail="PayPal-Mock-Response header is strictly forbidden when PAYPAL_MODE is not 'sandbox'"
+        )
+
+    idempotency_key = (
+        req.idempotency_key
+        or request.headers.get("PayPal-Request-Id")
+        or request.headers.get("paypal-request-id")
+    )
+
     try:
         capture = await paypal_client.capture_order(
             order_id=req.order_id,
-            idempotency_key=req.idempotency_key
+            idempotency_key=idempotency_key,
+            mock_response=mock_header
         )
         return {
             "status": "success",
             "capture": capture
         }
+    except PayPalError as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=f"PayPal error [{e.issue}] (debug_id: {e.debug_id}): {e.description}"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PayPal order capture failed: {str(e)}")
+        status_code = 422 if "INSTRUMENT_DECLINED" in str(e) or "DUPLICATE_INVOICE_ID" in str(e) or "expected 'COMPLETED'" in str(e) else 500
+        raise HTTPException(status_code=status_code, detail=f"PayPal order capture failed: {str(e)}")
+
+@app.get("/api/v1/payments/paypal/order/{order_id}")
+@app.get("/api/paypal/order/{order_id}")
+async def get_paypal_order_endpoint(order_id: str):
+    """Retrieves PayPal order status and details (GET /v2/checkout/orders/{id})."""
+    try:
+        order = await paypal_client.get_order_details(order_id=order_id)
+        return {
+            "status": "success",
+            "order": order
+        }
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"PayPal order retrieval failed: {str(e)}")
 
 @app.get("/api/merchants/search")
 async def search_merchants(q: str):

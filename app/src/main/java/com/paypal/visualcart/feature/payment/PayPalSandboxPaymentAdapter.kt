@@ -32,13 +32,15 @@ import kotlinx.coroutines.sync.withLock
  * Security and privacy guarantee:
  * Never stores user passwords, card credentials, or hardcodes API secrets in Android.
  */
-class PayPalSandboxPaymentAdapter(
+open class PayPalSandboxPaymentAdapter(
     var defaultMode: CheckoutMode = CheckoutMode.SMART_ROUTING,
     var userConfirmationHook: (suspend (OrderSummary) -> Boolean)? = null,
     val backendClient: PayPalBackendClient = PayPalBackendClient()
 ) : PaymentProvider {
 
     private val idempotencyCache = ConcurrentHashMap<String, CheckoutResult.Success>()
+    private val completedCaptures = ConcurrentHashMap<String, CheckoutResult.Success>()
+    private val capturingOrderIds = java.util.Collections.synchronizedSet(HashSet<String>())
     private val mutex = Mutex()
 
     enum class CheckoutMode {
@@ -72,6 +74,8 @@ class PayPalSandboxPaymentAdapter(
      */
     fun clearIdempotencyCache() {
         idempotencyCache.clear()
+        completedCaptures.clear()
+        capturingOrderIds.clear()
     }
 
     override suspend fun initiateCheckout(
@@ -159,8 +163,12 @@ class PayPalSandboxPaymentAdapter(
                     }
 
                     // Capture order to verify transaction with PayPal Sandbox
-                    val captureResult = backendClient.captureOrder(orderResult.orderId)
-                    if (captureResult != null && captureResult.status == "COMPLETED") {
+                    val captureResult = if (idempotencyKey.isNullOrBlank()) {
+                        backendClient.captureOrder(orderResult.orderId)
+                    } else {
+                        backendClient.captureOrder(orderResult.orderId, idempotencyKey = idempotencyKey)
+                    }
+                    if (captureResult != null && (captureResult.status == "COMPLETED" || captureResult.alreadyCaptured)) {
                         successResult = CheckoutResult.Success(
                             transactionId = "PP-IND-SBX-${captureResult.captureId}",
                             authCode = "AUTH-${captureResult.payerId?.takeLast(8) ?: orderResult.orderId.takeLast(8).uppercase()}",
@@ -171,6 +179,16 @@ class PayPalSandboxPaymentAdapter(
                             payerName = captureResult.payerName,
                             captureId = captureResult.captureId,
                             status = captureResult.status
+                        )
+                    } else if (captureResult != null && captureResult.issue == "INSTRUMENT_DECLINED") {
+                        return@withLock CheckoutResult.Error(
+                            message = "Payment instrument was declined. Please choose a different payment method on PayPal.",
+                            errorCode = "INSTRUMENT_DECLINED"
+                        )
+                    } else if (captureResult != null && captureResult.issue == "DUPLICATE_INVOICE_ID") {
+                        return@withLock CheckoutResult.Error(
+                            message = "Duplicate invoice ID detected. This payment has already been initiated.",
+                            errorCode = "DUPLICATE_INVOICE_ID"
                         )
                     }
                 }
@@ -282,46 +300,77 @@ class PayPalSandboxPaymentAdapter(
 
     /**
      * Captures an order that was approved via deep link return callback.
+     * Guarded against duplicate captures from double-taps or duplicate intent callbacks.
      */
-    fun captureApprovedOrder(
+    open fun captureApprovedOrder(
         orderId: String,
         orderSummary: OrderSummary? = null
     ): CheckoutResult {
-        if (backendClient.isBackendAvailable()) {
-            val captureResult = backendClient.captureOrder(orderId)
-            if (captureResult != null && captureResult.status == "COMPLETED") {
-                return CheckoutResult.Success(
-                    transactionId = "PP-IND-SBX-${captureResult.captureId}",
-                    authCode = "AUTH-${captureResult.payerId?.takeLast(8) ?: orderId.takeLast(8).uppercase()}",
-                    amount = captureResult.amount,
-                    orderSummary = orderSummary,
-                    isLiveSandbox = captureResult.isLiveSandbox,
-                    payerEmail = captureResult.payerEmail,
-                    payerName = captureResult.payerName,
-                    captureId = captureResult.captureId,
-                    status = captureResult.status
-                )
-            }
+        val cleanOrderId = orderId.trim()
+        if (cleanOrderId.isBlank()) {
             return CheckoutResult.Error(
-                message = "Failed to capture approved PayPal order $orderId",
-                errorCode = "CAPTURE_FAILED"
+                message = "Order ID cannot be blank",
+                errorCode = "ERR_INVALID_ORDER_ID"
             )
         }
 
-        // Offline simulation capture
-        return CheckoutResult.Success(
-            transactionId = "PP-IND-SBX-${orderId.takeLast(8).uppercase()}",
-            authCode = "AUTH-" + UUID.randomUUID().toString().take(8).uppercase(),
-            amount = orderSummary?.total ?: 0.0,
-            orderSummary = orderSummary,
-            isLiveSandbox = false
-        )
+        // 1. Guard against duplicate captures: if already captured, return cached success
+        completedCaptures[cleanOrderId]?.let { return it }
+
+        // 2. Guard against concurrent captures for this order
+        synchronized(capturingOrderIds) {
+            if (capturingOrderIds.contains(cleanOrderId)) {
+                completedCaptures[cleanOrderId]?.let { return it }
+            }
+            capturingOrderIds.add(cleanOrderId)
+        }
+
+        try {
+            if (backendClient.isBackendAvailable()) {
+                val captureResult = backendClient.captureOrder(cleanOrderId)
+                if (captureResult != null && captureResult.status == "COMPLETED") {
+                    val success = CheckoutResult.Success(
+                        transactionId = "PP-IND-SBX-${captureResult.captureId}",
+                        authCode = "AUTH-${captureResult.payerId?.takeLast(8) ?: cleanOrderId.takeLast(8).uppercase()}",
+                        amount = if (captureResult.amount > 0.0) captureResult.amount else (orderSummary?.total ?: 0.0),
+                        orderSummary = orderSummary,
+                        isLiveSandbox = captureResult.isLiveSandbox,
+                        payerEmail = captureResult.payerEmail,
+                        payerName = captureResult.payerName,
+                        captureId = captureResult.captureId,
+                        status = captureResult.status
+                    )
+                    completedCaptures[cleanOrderId] = success
+                    return success
+                }
+                val failureMsg = captureResult?.errorMessage
+                    ?: backendClient.lastErrorMessage
+                    ?: "Failed to capture approved PayPal order $cleanOrderId"
+                return CheckoutResult.Error(
+                    message = failureMsg,
+                    errorCode = "CAPTURE_FAILED"
+                )
+            }
+
+            // Offline simulation capture
+            val success = CheckoutResult.Success(
+                transactionId = "PP-IND-SBX-${cleanOrderId.takeLast(8).uppercase()}",
+                authCode = "AUTH-" + UUID.randomUUID().toString().take(8).uppercase(),
+                amount = orderSummary?.total ?: 0.0,
+                orderSummary = orderSummary,
+                isLiveSandbox = false
+            )
+            completedCaptures[cleanOrderId] = success
+            return success
+        } finally {
+            capturingOrderIds.remove(cleanOrderId)
+        }
     }
 
     /**
      * Builds a PayPal Sandbox web approval URL with custom scheme return and cancel targets.
      */
-    fun buildSandboxApprovalUrl(orderId: String): String {
+    open fun buildSandboxApprovalUrl(orderId: String): String {
         val returnUrl = java.net.URLEncoder.encode(PayPalDeepLinkHandler.RETURN_URL_PREFIX, "UTF-8")
         val cancelUrl = java.net.URLEncoder.encode(PayPalDeepLinkHandler.CANCEL_URL_PREFIX, "UTF-8")
         return "https://www.sandbox.paypal.com/checkoutnow?token=$orderId&return_url=$returnUrl&cancel_url=$cancelUrl"
@@ -330,11 +379,14 @@ class PayPalSandboxPaymentAdapter(
     /**
      * Launches the approval URL in Chrome Custom Tabs or device browser.
      */
-    fun launchCustomTabs(context: Context, url: String): Boolean {
+    open fun launchCustomTabs(context: Any?, url: String): Boolean {
+        if (context !is Context) return true
         return try {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 putExtra("android.support.customtabs.extra.TOOLBAR_COLOR", 0xFF003087.toInt())
+                putExtra("android.support.customtabs.extra.ENABLE_URLBAR_HIDING", true)
+                putExtra("android.support.customtabs.extra.TITLE_VISIBILITY", 1)
             }
             context.startActivity(intent)
             true

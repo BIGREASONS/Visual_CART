@@ -278,16 +278,55 @@ To verify the transaction settled with fake funds:
    - The captured payment appears with the exact gross amount, transaction fee, and net balance increase.
    - Click the transaction to inspect the PayPal Capture ID matching the one displayed in Visual Cart.
 
-### 8.4 Negative Testing & Mock Responses
-To test how the mobile app handles payment declines and instrument issues:
-1. Provide the `PayPal-Mock-Response` header in the backend:
-   ```json
-   {
-     "mock_application_codes": "INSTRUMENT_DECLINED"
-   }
-   ```
-2. The PayPal Sandbox API returns HTTP 422 with issue `INSTRUMENT_DECLINED` and `debug_id`.
-3. The Visual Cart backend and Android app parse the error envelope, display a user-friendly recovery prompt ("Payment instrument was declined. Please choose a different payment method on PayPal."), and allow the buyer to retry seamlessly.
+### 8.4 Sandbox Negative Testing & Security Hardening
+
+Visual Cart implements official PayPal Orders v2 Sandbox Negative Testing via the `PayPal-Mock-Response` header:
+
+#### 1. Supported Negative Testing Scenarios
+- **INSTRUMENT_DECLINED**: Simulates funding instrument decline on payment capture (`POST /v2/checkout/orders/{id}/capture`).
+  ```http
+  PayPal-Mock-Response: {"mock_application_codes": "INSTRUMENT_DECLINED"}
+  ```
+  PayPal Sandbox responds with HTTP 422 `UNPROCESSABLE_ENTITY`:
+  ```json
+  {
+    "name": "UNPROCESSABLE_ENTITY",
+    "details": [
+      {
+        "issue": "INSTRUMENT_DECLINED",
+        "description": "The instrument presented was declined. Please try another instrument."
+      }
+    ],
+    "message": "The requested action could not be performed, semantically incorrect, or failed business validation.",
+    "debug_id": "sbx_dbg_4f89d12a3e"
+  }
+  ```
+  The backend parses this error envelope, logs the diagnostics (`debug_id` and `issue`) without exposing credentials, and returns a structured recovery prompt for the mobile client.
+- **DUPLICATE_INVOICE_ID**: Simulates attempt to process an invoice that was previously captured.
+  ```http
+  PayPal-Mock-Response: {"mock_application_codes": "DUPLICATE_INVOICE_ID"}
+  ```
+  Returns HTTP 422 with issue `DUPLICATE_INVOICE_ID` and corresponding `debug_id`.
+
+#### 2. Duplicate Capture Idempotency via `PayPal-Request-Id`
+Mobile clients attach a unique UUID v4 as `PayPal-Request-Id` (or `idempotency_key`):
+- All capture transactions are cached in-memory and matched against `PayPal-Request-Id`.
+- Duplicate calls with identical request IDs immediately return the verified completed transaction without re-executing charges.
+- Double-capture attempts on previously captured order IDs are proactively detected, returning `already_captured = true` and `duplicate_capture_prevented = true`.
+
+#### 3. Diagnostic Debug ID Logging (Zero Secret Leakage)
+PayPal's official error envelope is parsed to extract `debug_id`, `issue`, and `description`. Diagnostics are logged at `ERROR` level:
+```text
+PayPal API error envelope parsed: issue='INSTRUMENT_DECLINED', debug_id='sbx_dbg_4f89d12a3e', desc='The instrument presented was declined. Please try another instrument.'
+```
+**Strict Privacy Guarantee**: Sensitive tokens (Bearer tokens, Client Credentials, PayPal passwords, user secrets) are strictly excluded from logs, error responses, and client-facing exceptions.
+
+#### 4. Sandbox-Only Security Enforcement
+Negative testing headers can cause severe disruption if activated against live transaction rails. Visual Cart enforces compile-time and runtime isolation:
+- The `PayPal-Mock-Response` header and parameter are **strictly permitted ONLY when `PAYPAL_MODE == "sandbox"`**.
+- In live or production environments (`PAYPAL_MODE == "live"` or `PAYPAL_MODE == "production"`), any request containing `PayPal-Mock-Response` is immediately rejected with `HTTP 400 Bad Request`:
+  > *"PayPal-Mock-Response header is strictly forbidden when PAYPAL_MODE is not 'sandbox'"*
+- At the low-level API client (`PayPalClient`), a `ValueError` is thrown before any network call can be initiated.
 
 ---
 *End of PayPal Integration Documentation.*

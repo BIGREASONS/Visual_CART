@@ -77,8 +77,11 @@ class PayPalBackendIntegrationTest {
         override fun createOrder(
             listing: MerchantListing,
             returnUrl: String,
-            cancelUrl: String
-        ): CreateOrderServerResult {
+            cancelUrl: String,
+            quantity: Int,
+            taxRate: Double,
+            deliveryFee: Double
+        ): CreateOrderServerResult? {
             val summary = OrderSummary.calculate(listing)
             return CreateOrderServerResult(
                 orderId = "5O190127TN364715T",

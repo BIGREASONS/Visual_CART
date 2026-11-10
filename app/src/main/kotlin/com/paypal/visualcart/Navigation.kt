@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -19,7 +20,10 @@ import com.paypal.visualcart.core.capture.CaptureIntentEvent
 import com.paypal.visualcart.data.local.VisualCartDatabase
 import com.paypal.visualcart.data.local.entity.MerchantListingEntity
 import com.paypal.visualcart.data.repository.CartRepositoryImpl
+import com.paypal.visualcart.feature.payment.PayPalCheckoutCoordinator
+import com.paypal.visualcart.feature.payment.PayPalCheckoutUiState
 import com.paypal.visualcart.ui.cart.CartScreen
+import com.paypal.visualcart.ui.checkout.PayPalCheckoutBottomSheet
 import com.paypal.visualcart.ui.detail.ProductDetailScreen
 import com.paypal.visualcart.ui.home.HomeScreen
 import com.paypal.visualcart.ui.matching.DetectedProductMatchResult
@@ -157,6 +161,14 @@ fun MainNavigation(
                     currentMatchResult = null
                     backStack.add(ProductDetailNavKey(id))
                 }
+            )
+        }
+
+        val checkoutState by PayPalCheckoutCoordinator.instance.uiState.collectAsState()
+        if (checkoutState !is PayPalCheckoutUiState.Idle) {
+            PayPalCheckoutBottomSheet(
+                coordinator = PayPalCheckoutCoordinator.instance,
+                onDismiss = { PayPalCheckoutCoordinator.instance.dismiss() }
             )
         }
     }

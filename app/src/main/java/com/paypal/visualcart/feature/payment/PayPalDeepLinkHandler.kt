@@ -53,11 +53,13 @@ object PayPalDeepLinkHandler {
 
     /**
      * Checks if the given URI string matches the visualcart:// deep link scheme and PayPal return/cancel hosts.
+     * Also supports backwards-compatible paypalvisualcart:// scheme.
      */
     fun isPayPalDeepLink(uriString: String?): Boolean {
         if (uriString.isNullOrBlank()) return false
         val (scheme, host) = extractSchemeAndHost(uriString) ?: return false
-        return scheme == SCHEME && (host == HOST_RETURN || host == HOST_CANCEL)
+        return (scheme == SCHEME && (host == HOST_RETURN || host == HOST_CANCEL)) ||
+            (scheme == "paypalvisualcart" && (host == "checkout" || host == HOST_RETURN || host == HOST_CANCEL))
     }
 
     /**
@@ -93,13 +95,22 @@ object PayPalDeepLinkHandler {
         val (scheme, host) = extractSchemeAndHost(uriString)
             ?: return Result.Invalid("Malformed deep link URI", uriString)
 
-        if (scheme != SCHEME) {
+        val isVisualCart = scheme == SCHEME
+        val isPayPalVisualCart = scheme == "paypalvisualcart"
+
+        if (!isVisualCart && !isPayPalVisualCart) {
             return Result.Invalid("Invalid scheme: $scheme (expected $SCHEME)", uriString)
+        }
+
+        val effectiveHost = if (isPayPalVisualCart && host == "checkout") {
+            if (uriString.contains("/cancel", ignoreCase = true)) HOST_CANCEL else HOST_RETURN
+        } else {
+            host
         }
 
         val queryParams = extractQueryParams(uriString)
 
-        return when (host) {
+        return when (effectiveHost) {
             HOST_RETURN -> {
                 // Support PayPal standard parameters (token, PayerID) as well as common variations
                 val rawOrderId = queryParams["token"]

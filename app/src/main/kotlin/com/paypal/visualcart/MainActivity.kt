@@ -29,6 +29,7 @@ import com.paypal.visualcart.feature.ai.LocalProductParser
 import com.paypal.visualcart.feature.merchant.DemoMerchantFixtures
 import com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine
 import com.paypal.visualcart.feature.merchant.ProductUrlExtractor
+import com.paypal.visualcart.feature.payment.PayPalCheckoutCoordinator
 import com.paypal.visualcart.feature.payment.PayPalDeepLinkHandler
 import com.paypal.visualcart.service.overlay.VisualCartOverlayService
 import com.paypal.visualcart.service.tile.VisualCartTileService
@@ -109,7 +110,11 @@ class MainActivity : ComponentActivity() {
 
         // 1. Handle PayPal Sandbox custom deep links (Chrome Custom Tabs return/cancel)
         if (PayPalDeepLinkHandler.isPayPalDeepLink(intent)) {
-            when (val deepLinkResult = PayPalDeepLinkHandler.parse(intent)) {
+            val deepLinkResult = PayPalDeepLinkHandler.parse(intent)
+            if (deepLinkResult != null) {
+                PayPalCheckoutCoordinator.instance.handleDeepLink(deepLinkResult)
+            }
+            when (deepLinkResult) {
                 is PayPalDeepLinkHandler.Result.Approved -> {
                     Log.i(TAG, "PayPal sandbox checkout approved: orderId=${deepLinkResult.orderId}, payerId=${deepLinkResult.payerId}")
                     Toast.makeText(
@@ -138,6 +143,8 @@ class MainActivity : ComponentActivity() {
                 }
                 null -> Unit
             }
+            // Clear intent data to prevent re-triggering upon configuration change/lifecycle restoration
+            intent.data = null
             return
         }
 

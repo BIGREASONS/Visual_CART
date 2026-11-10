@@ -17,7 +17,8 @@ data class CreateOrderServerResult(
     val currency: String,
     val amount: Double,
     val isLiveSandbox: Boolean,
-    val orderSummary: OrderSummary? = null
+    val orderSummary: OrderSummary? = null,
+    val errorMessage: String? = null
 )
 
 data class CaptureOrderServerResult(
@@ -30,7 +31,12 @@ data class CaptureOrderServerResult(
     val payerName: String? = null,
     val payerId: String? = null,
     val createTime: String? = null,
-    val isLiveSandbox: Boolean = false
+    val isLiveSandbox: Boolean = false,
+    val errorMessage: String? = null,
+    val alreadyCaptured: Boolean = false,
+    val duplicateCapturePrevented: Boolean = false,
+    val debugId: String? = null,
+    val issue: String? = null
 )
 
 data class PayPalServerConfig(
@@ -58,6 +64,10 @@ open class PayPalBackendClient(
     @Volatile
     private var detectedBaseUrl: String? = null
 
+    @Volatile
+    var lastErrorMessage: String? = null
+        private set
+
     val baseUrl: String
         get() = detectedBaseUrl ?: configuredBaseUrl?.takeIf { it.isNotBlank() } ?: resolveBaseUrl()
 
@@ -66,8 +76,8 @@ open class PayPalBackendClient(
         const val DEFAULT_LOCALHOST_URL = "http://localhost:8000"
         const val ENV_BACKEND_URL = "PAYPAL_BACKEND_URL"
         const val PROP_BACKEND_URL = "paypal.backend.url"
-        const val DEFAULT_RETURN_URL = "paypalvisualcart://checkout/success"
-        const val DEFAULT_CANCEL_URL = "paypalvisualcart://checkout/cancel"
+        const val DEFAULT_RETURN_URL = "visualcart://paypal-return"
+        const val DEFAULT_CANCEL_URL = "visualcart://paypal-cancel"
 
         fun resolveBaseUrl(): String {
             return System.getenv(ENV_BACKEND_URL)?.takeIf { it.isNotBlank() }
@@ -133,7 +143,10 @@ open class PayPalBackendClient(
     open fun createOrder(
         listing: MerchantListing,
         returnUrl: String = DEFAULT_RETURN_URL,
-        cancelUrl: String = DEFAULT_CANCEL_URL
+        cancelUrl: String = DEFAULT_CANCEL_URL,
+        quantity: Int = 1,
+        taxRate: Double = 0.18,
+        deliveryFee: Double = 0.0
     ): CreateOrderServerResult? {
         val payload = """
             {
@@ -142,15 +155,18 @@ open class PayPalBackendClient(
               "currency": "${escapeJson(listing.currency)}",
               "listing_id": "${escapeJson(listing.id)}",
               "merchant_name": "${escapeJson(listing.merchantName)}",
-              "quantity": 1,
-              "tax_rate": 0.18,
-              "delivery_fee": 0.0,
+              "quantity": $quantity,
+              "tax_rate": $taxRate,
+              "delivery_fee": $deliveryFee,
               "return_url": "${escapeJson(returnUrl)}",
               "cancel_url": "${escapeJson(cancelUrl)}"
             }
         """.trimIndent()
 
-        val responseText = executePost("$baseUrl/api/v1/payments/paypal/create-order", payload) ?: return null
+        val responseText = executePost("$baseUrl/api/v1/payments/paypal/create-order", payload)
+        if (responseText == null) {
+            return null
+        }
 
         val orderId = extractString(responseText, "order_id") ?: return null
         val status = extractString(responseText, "status") ?: "CREATED"
@@ -159,9 +175,9 @@ open class PayPalBackendClient(
         val amount = extractDouble(responseText, "amount") ?: listing.price
         val isLive = extractBoolean(responseText, "is_live_sandbox") ?: false
 
-        val subtotal = extractNestedDouble(responseText, "order_summary", "subtotal") ?: listing.price
-        val tax = extractNestedDouble(responseText, "order_summary", "tax") ?: (subtotal * 0.18)
-        val delivery = extractNestedDouble(responseText, "order_summary", "delivery_fee") ?: 0.0
+        val subtotal = extractNestedDouble(responseText, "order_summary", "subtotal") ?: (listing.price * quantity)
+        val tax = extractNestedDouble(responseText, "order_summary", "tax") ?: (subtotal * taxRate)
+        val delivery = extractNestedDouble(responseText, "order_summary", "delivery_fee") ?: deliveryFee
         val total = extractNestedDouble(responseText, "order_summary", "total") ?: (subtotal + tax + delivery)
 
         val summary = OrderSummary(
@@ -190,8 +206,62 @@ open class PayPalBackendClient(
      * Calls POST /api/v1/payments/paypal/capture-order on the backend.
      */
     open fun captureOrder(orderId: String): CaptureOrderServerResult? {
-        val payload = """{"order_id": "${escapeJson(orderId)}"}"""
-        val responseText = executePost("$baseUrl/api/v1/payments/paypal/capture-order", payload) ?: return null
+        return captureOrder(orderId, null, null)
+    }
+
+    /**
+     * Calls POST /api/v1/payments/paypal/capture-order on the backend.
+     * Supports client idempotency via PayPal-Request-Id and negative testing simulation via PayPal-Mock-Response.
+     */
+    open fun captureOrder(
+        orderId: String,
+        idempotencyKey: String? = null,
+        mockResponse: String? = null
+    ): CaptureOrderServerResult? {
+        val payload = buildString {
+            append("""{"order_id": "${escapeJson(orderId)}"""")
+            if (!idempotencyKey.isNullOrBlank()) {
+                append(""", "idempotency_key": "${escapeJson(idempotencyKey)}"""")
+            }
+            if (!mockResponse.isNullOrBlank()) {
+                append("""", "mock_response": "${escapeJson(mockResponse)}"""")
+            }
+            append("}")
+        }
+        val headers = mutableMapOf<String, String>()
+        if (!idempotencyKey.isNullOrBlank()) {
+            headers["PayPal-Request-Id"] = idempotencyKey
+        }
+        if (!mockResponse.isNullOrBlank()) {
+            headers["PayPal-Mock-Response"] = mockResponse
+        }
+
+        val responseText = executePost("$baseUrl/api/v1/payments/paypal/capture-order", payload, headers)
+
+        if (responseText == null) {
+            val errorIssue = lastErrorMessage?.let { msg ->
+                when {
+                    "INSTRUMENT_DECLINED" in msg -> "INSTRUMENT_DECLINED"
+                    "DUPLICATE_INVOICE_ID" in msg -> "DUPLICATE_INVOICE_ID"
+                    else -> null
+                }
+            }
+            val errorDebugId = lastErrorMessage?.let { msg ->
+                val match = Regex("""debug_id:\s*([a-zA-Z0-9_-]+)""").find(msg)
+                match?.groupValues?.get(1)
+            }
+
+            return CaptureOrderServerResult(
+                orderId = orderId,
+                captureId = "",
+                status = if (errorIssue != null) "DECLINED" else "FAILED",
+                amount = 0.0,
+                currency = "INR",
+                errorMessage = lastErrorMessage ?: "Failed to connect to PayPal backend service",
+                issue = errorIssue,
+                debugId = errorDebugId
+            )
+        }
 
         val capOrderId = extractString(responseText, "order_id") ?: orderId
         val captureId = extractString(responseText, "capture_id") ?: ("CAP-" + orderId.takeLast(8))
@@ -203,6 +273,11 @@ open class PayPalBackendClient(
         val payerId = extractString(responseText, "payer_id")
         val createTime = extractString(responseText, "create_time")
         val isLive = extractBoolean(responseText, "is_live_sandbox") ?: false
+        val errorMsg = extractString(responseText, "error") ?: extractString(responseText, "message")
+        val alreadyCaptured = extractBoolean(responseText, "already_captured") ?: false
+        val duplicatePrevented = extractBoolean(responseText, "duplicate_capture_prevented") ?: false
+        val debugId = extractString(responseText, "debug_id")
+        val issue = extractString(responseText, "issue")
 
         return CaptureOrderServerResult(
             orderId = capOrderId,
@@ -214,7 +289,12 @@ open class PayPalBackendClient(
             payerName = payerName,
             payerId = payerId,
             createTime = createTime,
-            isLiveSandbox = isLive
+            isLiveSandbox = isLive,
+            errorMessage = errorMsg,
+            alreadyCaptured = alreadyCaptured,
+            duplicateCapturePrevented = duplicatePrevented,
+            debugId = debugId,
+            issue = issue
         )
     }
 
@@ -237,14 +317,26 @@ open class PayPalBackendClient(
             if (conn.responseCode in 200..299) {
                 BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
             } else {
+                val errorBody = try {
+                    conn.errorStream?.let { BufferedReader(InputStreamReader(it)).use { r -> r.readText() } }
+                } catch (_: Exception) {
+                    null
+                }
+                lastErrorMessage = errorBody?.let { extractString(it, "detail") ?: extractString(it, "message") }
+                    ?: "HTTP ${conn.responseCode}: ${conn.responseMessage}"
                 null
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            lastErrorMessage = e.message ?: "Network error"
             null
         }
     }
 
-    private fun executePost(urlString: String, jsonPayload: String): String? {
+    private fun executePost(
+        urlString: String,
+        jsonPayload: String,
+        headers: Map<String, String> = emptyMap()
+    ): String? {
         return try {
             val url = URL(urlString)
             val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -254,6 +346,9 @@ open class PayPalBackendClient(
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
+                for ((k, v) in headers) {
+                    setRequestProperty(k, v)
+                }
             }
             OutputStreamWriter(conn.outputStream).use { writer ->
                 writer.write(jsonPayload)
@@ -262,9 +357,17 @@ open class PayPalBackendClient(
             if (conn.responseCode in 200..299) {
                 BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
             } else {
+                val errorBody = try {
+                    conn.errorStream?.let { BufferedReader(InputStreamReader(it)).use { r -> r.readText() } }
+                } catch (_: Exception) {
+                    null
+                }
+                lastErrorMessage = errorBody?.let { extractString(it, "detail") ?: extractString(it, "message") }
+                    ?: "HTTP ${conn.responseCode}: ${conn.responseMessage}"
                 null
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            lastErrorMessage = e.message ?: "Network error"
             null
         }
     }

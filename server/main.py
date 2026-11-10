@@ -22,24 +22,42 @@ import httpx
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("paypal_server")
 
-# Load environment variables
-env_path = Path(__file__).resolve().parent / ".env"
-load_dotenv(dotenv_path=env_path)
+# Load environment variables (server/.env or root .env)
+_server_dir = Path(__file__).resolve().parent
+_root_dir = _server_dir.parent
+if (_server_dir / ".env").exists():
+    load_dotenv(_server_dir / ".env")
+if (_root_dir / ".env").exists():
+    load_dotenv(_root_dir / ".env")
+load_dotenv()
 
 PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
-PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()
-DEFAULT_CURRENCY = os.getenv("PAYPAL_CURRENCY", "USD").strip().upper()
+PAYPAL_MODE = os.getenv("PAYPAL_MODE", os.getenv("PAYPAL_ENV", "sandbox")).strip().lower()
+DEFAULT_CURRENCY = os.getenv("PAYPAL_CURRENCY", os.getenv("DEFAULT_CURRENCY", "USD")).strip().upper()
+DEFAULT_TAX_RATE = float(os.getenv("PAYPAL_TAX_RATE", "0.08"))
 INR_TO_USD_RATE = float(os.getenv("INR_TO_USD_RATE", "0.012"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
-PAYPAL_BASE_URL = (
-    "https://api-m.sandbox.paypal.com"
-    if PAYPAL_MODE == "sandbox"
-    else "https://api-m.paypal.com"
-)
+def get_paypal_client_id() -> str:
+    return os.getenv("PAYPAL_CLIENT_ID", PAYPAL_CLIENT_ID).strip()
+
+def get_paypal_client_secret() -> str:
+    return os.getenv("PAYPAL_CLIENT_SECRET", PAYPAL_CLIENT_SECRET).strip()
+
+def get_paypal_mode() -> str:
+    return os.getenv("PAYPAL_MODE", os.getenv("PAYPAL_ENV", PAYPAL_MODE)).strip().lower()
+
+def get_paypal_base_url() -> str:
+    return (
+        "https://api-m.sandbox.paypal.com"
+        if get_paypal_mode() == "sandbox"
+        else "https://api-m.paypal.com"
+    )
+
+PAYPAL_BASE_URL = get_paypal_base_url()
 
 app = FastAPI(
     title="PayPal Visual Cart Backend API",
@@ -64,15 +82,20 @@ _token_expires_at: float = 0.0
 
 # In-memory store for fallback/simulated orders when real credentials are not provided
 _simulated_orders: Dict[str, Dict[str, Any]] = {}
+_captured_orders: Dict[str, Any] = {}
+_idempotency_records: Dict[str, Any] = {}
 
 
 def has_live_paypal_credentials() -> bool:
     """Returns True if genuine, non-placeholder PayPal credentials are configured."""
+    cid = get_paypal_client_id()
+    sec = get_paypal_client_secret()
     return bool(
-        PAYPAL_CLIENT_ID
-        and PAYPAL_CLIENT_SECRET
-        and not PAYPAL_CLIENT_ID.startswith("your_")
-        and not PAYPAL_CLIENT_SECRET.startswith("your_")
+        cid
+        and sec
+        and not cid.startswith("your_")
+        and not sec.startswith("your_")
+        and not cid.startswith("sb-demo-")
     )
 
 
@@ -93,8 +116,11 @@ async def get_paypal_access_token() -> str:
             detail="PayPal client credentials are not configured. Update PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET in .env.",
         )
 
-    auth_str = f"{PAYPAL_CLIENT_ID}:{PAYPAL_CLIENT_SECRET}"
+    cid = get_paypal_client_id()
+    sec = get_paypal_client_secret()
+    auth_str = f"{cid}:{sec}"
     basic_auth = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+    base_url = get_paypal_base_url()
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
@@ -134,15 +160,15 @@ async def get_paypal_access_token() -> str:
 class CreateOrderRequest(BaseModel):
     title: str = Field(..., description="Product title or description")
     amount: float = Field(..., gt=0, description="Base price of the product")
-    currency: str = Field(default="USD", description="Currency code (e.g. USD, INR, EUR)")
+    currency: Optional[str] = Field(default=None, description="ISO 4217 currency code (e.g. USD, EUR, GBP, INR)")
     listing_id: Optional[str] = Field(default=None, description="Internal merchant listing identifier")
     merchant_name: Optional[str] = Field(
         default="PayPal Visual Cart Sandbox Store",
         description="Name of the demo merchant",
     )
     quantity: int = Field(default=1, ge=1, description="Product quantity")
-    tax_rate: float = Field(default=0.18, ge=0.0, description="Tax rate, default 18% GST")
-    delivery_fee: float = Field(default=0.0, ge=0.0, description="Delivery / shipping fee")
+    tax_rate: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Tax rate, defaults to PAYPAL_TAX_RATE")
+    delivery_fee: Optional[float] = Field(default=None, ge=0.0, description="Delivery / shipping fee")
     return_url: Optional[str] = Field(
         default="paypalvisualcart://checkout/success",
         description="Return URL after buyer approval",
@@ -154,6 +180,14 @@ class CreateOrderRequest(BaseModel):
     convert_inr_to_usd: bool = Field(
         default=False,
         description="Optionally convert INR amount to USD for international sandbox accounts",
+    )
+    invoice_id: Optional[str] = Field(
+        default=None,
+        description="Optional merchant invoice ID for duplicate checking",
+    )
+    mock_response: Optional[str] = Field(
+        default=None,
+        description="Mock response header for sandbox negative testing",
     )
 
 
@@ -184,6 +218,8 @@ class CreateOrderResponse(BaseModel):
 
 class CaptureOrderRequest(BaseModel):
     order_id: str = Field(..., description="PayPal Order ID to capture")
+    idempotency_key: Optional[str] = Field(default=None, description="Optional idempotency key (PayPal-Request-Id)")
+    mock_response: Optional[str] = Field(default=None, description="Mock response header for sandbox negative testing")
 
 
 class CaptureOrderResponse(BaseModel):
@@ -192,22 +228,30 @@ class CaptureOrderResponse(BaseModel):
     status: str
     amount: float
     currency: str
+    gross_amount: Optional[float] = None
+    seller_protection_status: Optional[str] = None
     payer_email: Optional[str] = None
     payer_name: Optional[str] = None
     payer_id: Optional[str] = None
     create_time: Optional[str] = None
     is_live_sandbox: bool
     raw_details: Optional[Dict[str, Any]] = None
+    already_captured: Optional[bool] = False
+    duplicate_capture_prevented: Optional[bool] = False
 
 
 class ConfigResponse(BaseModel):
-    client_id: str
-    mode: str
-    default_currency: str
-    brand_name: str
-    is_sandbox: bool
-    is_live_configured: bool
-    deep_link_scheme: str
+    provider: str = Field(default="paypal", description="Payment provider identifier")
+    mode: str = Field(default="sandbox", description="PayPal mode: sandbox or live")
+    credentials_configured: bool = Field(..., description="Whether non-placeholder PayPal credentials are set")
+    oauth_ready: bool = Field(..., description="Whether OAuth token endpoint is ready")
+    orders_api_ready: bool = Field(..., description="Whether Orders v2 API endpoint is ready")
+    client_id: Optional[str] = Field(default="sb-demo-client-id", description="Public client ID (safe for frontend)")
+    default_currency: Optional[str] = Field(default="USD", description="Default currency")
+    brand_name: Optional[str] = Field(default="PayPal Visual Cart Demo Store", description="Store branding")
+    is_sandbox: Optional[bool] = Field(default=True, description="Whether mode is sandbox")
+    is_live_configured: Optional[bool] = Field(default=False, description="Whether live credentials configured")
+    deep_link_scheme: Optional[str] = Field(default="paypalvisualcart", description="Deep link return scheme")
 
 
 class RecognizeProductRequest(BaseModel):
@@ -221,7 +265,7 @@ class RecognizedProductResponse(BaseModel):
     brand: Optional[str] = None
     category: str
     estimated_price: Optional[float] = None
-    currency: str = "INR"
+    currency: str = Field(default_factory=lambda: DEFAULT_CURRENCY)
     specifications: Dict[str, str] = {}
     match_reason: str
     confidence: float
@@ -229,27 +273,78 @@ class RecognizedProductResponse(BaseModel):
 
 
 # ============================================================================
-# Helpers
+# Helpers & ISO 4217 Currency Precision
 # ============================================================================
+ZERO_DECIMAL_CURRENCIES = {"JPY", "HUF", "TWD", "KRW", "VND"}
+THREE_DECIMAL_CURRENCIES = {"BHD", "JOD", "KWD", "OMR", "TND"}
+
+
+def get_currency_decimals(currency: str) -> int:
+    """Returns number of decimal digits required by ISO 4217 / PayPal for given currency."""
+    curr = (currency or DEFAULT_CURRENCY).strip().upper()
+    if curr in ZERO_DECIMAL_CURRENCIES:
+        return 0
+    if curr in THREE_DECIMAL_CURRENCIES:
+        return 3
+    return 2
+
+
+def format_currency_amount(amount: float, currency: str = "USD") -> str:
+    """Formats an amount into a PayPal ISO 4217 compliant string with correct decimal precision."""
+    decimals = get_currency_decimals(currency)
+    if decimals == 0:
+        return str(int(round(amount)))
+    return f"{amount:.{decimals}f}"
+
+
+def round_currency_amount(amount: float, currency: str = "USD") -> float:
+    """Rounds amount to the correct decimal precision for the given currency."""
+    decimals = get_currency_decimals(currency)
+    if decimals == 0:
+        return float(int(round(amount)))
+    return round(amount, decimals)
+
+
 def format_currency_string(amount: float, currency: str) -> str:
-    """Formats amount with appropriate currency symbol."""
-    if currency == "INR":
-        return f"₹{amount:,.2f}"
-    elif currency == "USD":
-        return f"${amount:,.2f}"
-    elif currency == "EUR":
-        return f"€{amount:,.2f}"
-    elif currency == "GBP":
-        return f"£{amount:,.2f}"
-    return f"{currency} {amount:,.2f}"
+    """Formats amount with appropriate currency symbol and minor unit precision."""
+    curr = (currency or DEFAULT_CURRENCY).strip().upper()
+    if curr == "JPY" and amount != int(amount):
+        return f"JPY {amount:,.2f}"
+
+    decimals = get_currency_decimals(curr)
+    if decimals == 0:
+        formatted_num = f"{int(round(amount)):,}"
+    else:
+        formatted_num = f"{amount:,.{decimals}f}"
+
+    symbols = {
+        "INR": "₹",
+        "USD": "$",
+        "EUR": "€",
+        "GBP": "£",
+        "JPY": "¥",
+        "CAD": "CA$",
+        "AUD": "AU$",
+    }
+    sym = symbols.get(curr)
+    if sym:
+        return f"{sym}{formatted_num}"
+    return f"{curr} {formatted_num}"
 
 
 def calculate_order_breakdown(req: CreateOrderRequest) -> OrderSummaryResponse:
-    """Calculates server-side financial breakdown (Subtotal, Tax/GST, Delivery, Total)."""
-    subtotal = round(req.amount * req.quantity, 2)
-    tax = round(subtotal * req.tax_rate, 2)
-    delivery = round(req.delivery_fee, 2)
-    total = round(subtotal + tax + delivery, 2)
+    """Calculates server-side financial breakdown (Subtotal, Tax, Delivery, Total).
+    
+    Server-authoritative calculations guarantee that clients cannot manipulate amounts.
+    """
+    curr = (req.currency or DEFAULT_CURRENCY).strip().upper()
+    effective_tax_rate = req.tax_rate if req.tax_rate is not None else DEFAULT_TAX_RATE
+    effective_delivery = req.delivery_fee if req.delivery_fee is not None else 0.0
+
+    subtotal = round_currency_amount(req.amount * req.quantity, curr)
+    tax = round_currency_amount(subtotal * effective_tax_rate, curr)
+    delivery = round_currency_amount(effective_delivery, curr)
+    total = round_currency_amount(subtotal + tax + delivery, curr)
 
     return OrderSummaryResponse(
         listing_id=req.listing_id,
@@ -259,11 +354,11 @@ def calculate_order_breakdown(req: CreateOrderRequest) -> OrderSummaryResponse:
         tax=tax,
         delivery_fee=delivery,
         total=total,
-        currency=req.currency,
-        formatted_subtotal=format_currency_string(subtotal, req.currency),
-        formatted_tax=format_currency_string(tax, req.currency),
-        formatted_delivery="FREE" if delivery == 0.0 else format_currency_string(delivery, req.currency),
-        formatted_total=format_currency_string(total, req.currency),
+        currency=curr,
+        formatted_subtotal=format_currency_string(subtotal, curr),
+        formatted_tax=format_currency_string(tax, curr),
+        formatted_delivery="FREE" if delivery == 0.0 else format_currency_string(delivery, curr),
+        formatted_total=format_currency_string(total, curr),
     )
 
 
@@ -275,19 +370,40 @@ def calculate_order_breakdown(req: CreateOrderRequest) -> OrderSummaryResponse:
 @app.get("/api/paypal/configuration", response_model=ConfigResponse)
 async def get_configuration():
     """
-    Returns public PayPal configuration safely without ever exposing the client secret.
-    Allows clients to determine if live sandbox or simulation is active.
+    Returns public PayPal configuration safely without ever exposing client secret or tokens.
+    Provides provider, mode, credentials_configured, oauth_ready, and orders_api_ready status.
     """
     is_live = has_live_paypal_credentials()
+    mode = get_paypal_mode()
+    cid = get_paypal_client_id()
+    oauth_ready = is_live or bool(_cached_token and time.time() < _token_expires_at)
+    orders_api_ready = is_live
+
     return ConfigResponse(
-        client_id=PAYPAL_CLIENT_ID if is_live else "sb-demo-client-id",
-        mode=PAYPAL_MODE,
-        default_currency=DEFAULT_CURRENCY,
+        provider="paypal",
+        mode=mode,
+        credentials_configured=is_live,
+        oauth_ready=oauth_ready,
+        orders_api_ready=orders_api_ready,
+        client_id=cid if is_live else "sb-demo-client-id",
+        default_currency=os.getenv("PAYPAL_CURRENCY", DEFAULT_CURRENCY),
         brand_name="PayPal Visual Cart Demo Store",
-        is_sandbox=(PAYPAL_MODE == "sandbox"),
+        is_sandbox=(mode == "sandbox"),
         is_live_configured=is_live,
         deep_link_scheme="paypalvisualcart",
     )
+
+
+def extract_mock_issue_code(mock_header: str) -> str:
+    """Extracts mock application issue code from plain string or JSON header."""
+    trimmed = (mock_header or "").strip()
+    if trimmed.startswith("{"):
+        try:
+            parsed = json.loads(trimmed)
+            return parsed.get("mock_application_codes") or "INSTRUMENT_DECLINED"
+        except Exception:
+            pass
+    return trimmed
 
 
 @app.post("/api/v1/payments/paypal/create-order", response_model=CreateOrderResponse)
@@ -297,13 +413,29 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
     Path 1 (PayPal sandbox demo checkout):
     Calculates server-side financial breakdown and calls official PayPal Checkout Orders v2 API.
     Returns the genuine PayPal order_id and approve_url for buyer authorization.
+    Supports sandbox negative testing via PayPal-Mock-Response header.
+    Strictly forbids negative testing headers in production/live mode.
     """
+    mock_header = (
+        request.headers.get("PayPal-Mock-Response")
+        or request.headers.get("paypal-mock-response")
+        or req.mock_response
+    )
+    if mock_header and PAYPAL_MODE != "sandbox":
+        logger.warning(f"PayPal-Mock-Response header blocked: forbidden in mode '{PAYPAL_MODE}'")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="PayPal-Mock-Response header is strictly forbidden when PAYPAL_MODE is not 'sandbox'",
+        )
+
     # 1. Compute server-side financial breakdown
     summary = calculate_order_breakdown(req)
-    total_str = f"{summary.total:.2f}"
-    subtotal_str = f"{summary.subtotal:.2f}"
-    tax_str = f"{summary.tax:.2f}"
-    delivery_str = f"{summary.delivery_fee:.2f}"
+    curr = summary.currency
+    total_str = format_currency_amount(summary.total, curr)
+    subtotal_str = format_currency_amount(summary.subtotal, curr)
+    tax_str = format_currency_amount(summary.tax, curr)
+    delivery_str = format_currency_amount(summary.delivery_fee, curr)
+    unit_amount_str = format_currency_amount(req.amount, curr)
 
     # Return and Cancel URLs
     return_url = req.return_url or "paypalvisualcart://checkout/success"
@@ -313,45 +445,46 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
     if has_live_paypal_credentials():
         token = await get_paypal_access_token()
 
-        # PayPal Orders v2 payload
-        order_payload = {
-            "intent": "CAPTURE",
-            "purchase_units": [
-                {
-                    "reference_id": req.listing_id or "default",
-                    "description": req.title[:127],
-                    "custom_id": req.listing_id or "visual_cart_order",
-                    "amount": {
-                        "currency_code": req.currency,
-                        "value": total_str,
-                        "breakdown": {
-                            "item_total": {
-                                "currency_code": req.currency,
-                                "value": subtotal_str,
-                            },
-                            "tax_total": {
-                                "currency_code": req.currency,
-                                "value": tax_str,
-                            },
-                            "shipping": {
-                                "currency_code": req.currency,
-                                "value": delivery_str,
-                            },
-                        },
+        purchase_unit: Dict[str, Any] = {
+            "reference_id": req.listing_id or "default",
+            "description": req.title[:127],
+            "custom_id": req.listing_id or "visual_cart_order",
+            "amount": {
+                "currency_code": curr,
+                "value": total_str,
+                "breakdown": {
+                    "item_total": {
+                        "currency_code": curr,
+                        "value": subtotal_str,
                     },
-                    "items": [
-                        {
-                            "name": req.title[:127],
-                            "unit_amount": {
-                                "currency_code": req.currency,
-                                "value": f"{req.amount:.2f}",
-                            },
-                            "quantity": str(req.quantity),
-                            "category": "PHYSICAL_GOODS",
-                        }
-                    ],
+                    "tax_total": {
+                        "currency_code": curr,
+                        "value": tax_str,
+                    },
+                    "shipping": {
+                        "currency_code": curr,
+                        "value": delivery_str,
+                    },
+                },
+            },
+            "items": [
+                {
+                    "name": req.title[:127],
+                    "unit_amount": {
+                        "currency_code": curr,
+                        "value": unit_amount_str,
+                    },
+                    "quantity": str(req.quantity),
+                    "category": "PHYSICAL_GOODS",
                 }
             ],
+        }
+        if req.invoice_id:
+            purchase_unit["invoice_id"] = req.invoice_id[:127]
+
+        order_payload = {
+            "intent": "CAPTURE",
+            "purchase_units": [purchase_unit],
             "application_context": {
                 "brand_name": "PayPal Visual Cart",
                 "landing_page": "NO_PREFERENCE",
@@ -361,15 +494,22 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
             },
         }
 
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
+        if mock_header:
+            if mock_header.startswith("{"):
+                headers["PayPal-Mock-Response"] = mock_header
+            else:
+                headers["PayPal-Mock-Response"] = json.dumps({"mock_application_codes": mock_header})
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
                 response = await client.post(
                     f"{PAYPAL_BASE_URL}/v2/checkout/orders",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                        "Prefer": "return=representation",
-                    },
+                    headers=headers,
                     json=order_payload,
                 )
                 response.raise_for_status()
@@ -393,17 +533,26 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
                     order_id=order_id,
                     status=status_str,
                     approve_url=approve_url,
-                    currency=req.currency,
+                    currency=curr,
                     amount=summary.total,
                     order_summary=summary,
                     is_live_sandbox=True,
                 )
             except httpx.HTTPStatusError as e:
-                logger.error(f"PayPal create-order HTTP error {e.response.status_code}: {e.response.text}")
-                # If error is due to currency mismatch (e.g. INR not enabled on some test accounts), fall back gracefully
+                # Parse official PayPal error envelope (debug_id, details, issue)
+                try:
+                    error_json = e.response.json()
+                    debug_id = error_json.get("debug_id")
+                    details = error_json.get("details", [])
+                    issue = details[0].get("issue") if details else error_json.get("name", "PAYPAL_ERROR")
+                    desc = details[0].get("description") if details else error_json.get("message", e.response.text)
+                    logger.error(f"PayPal create-order HTTP error: issue={issue}, debug_id={debug_id}, desc={desc}")
+                    error_detail = f"PayPal error [{issue}] (debug_id: {debug_id}): {desc}"
+                except Exception:
+                    error_detail = f"PayPal Orders v2 error: {e.response.text}"
                 raise HTTPException(
                     status_code=e.response.status_code,
-                    detail=f"PayPal Orders v2 error: {e.response.text}",
+                    detail=error_detail,
                 )
             except Exception as e:
                 logger.error(f"PayPal create-order error: {str(e)}")
@@ -413,6 +562,22 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
                 )
 
     # 3. Graceful Simulation Sandbox Mode (when credentials not configured or during offline testing)
+    if mock_header:
+        sim_debug_id = f"sbx_dbg_{uuid.uuid4().hex[:12]}"
+        sim_issue = extract_mock_issue_code(mock_header)
+        sim_desc = (
+            "The requested invoice ID was already used for an earlier order."
+            if sim_issue == "DUPLICATE_INVOICE_ID"
+            else f"Simulated mock failure for {sim_issue}"
+        )
+        logger.error(
+            f"PayPal create-order error envelope parsed: issue='{sim_issue}', debug_id='{sim_debug_id}', desc='{sim_desc}'"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"PayPal error [{sim_issue}] (debug_id: {sim_debug_id}): {sim_desc}",
+        )
+
     simulated_order_id = "SBX-" + uuid.uuid4().hex[:12].upper()
     host_url = str(request.base_url).rstrip("/")
     # Build simulated approval URL that redirects to deep link
@@ -421,7 +586,7 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
     _simulated_orders[simulated_order_id] = {
         "id": simulated_order_id,
         "status": "CREATED",
-        "currency": req.currency,
+        "currency": curr,
         "amount": summary.total,
         "summary": summary.model_dump(),
         "created_at": time.time(),
@@ -433,7 +598,7 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
         order_id=simulated_order_id,
         status="CREATED",
         approve_url=approve_url,
-        currency=req.currency,
+        currency=curr,
         amount=summary.total,
         order_summary=summary,
         is_live_sandbox=False,
@@ -445,10 +610,38 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
 async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
     """
     Captures payment for an approved PayPal order via POST /v2/checkout/orders/{id}/capture.
-    Verifies COMPLETED status and returns verified transaction details.
+    Strictly verifies status == "COMPLETED" (never treating APPROVED as completed).
+    Extracts real PayPal capture ID, gross amount, currency, timestamp, and seller protection status.
     Supports negative testing simulation via PayPal-Mock-Response header.
     """
     order_id = req.order_id.strip()
+    idempotency_key = req.idempotency_key or request.headers.get("PayPal-Request-Id") or request.headers.get("paypal-request-id")
+
+    # Check for negative mock response requested via header
+    mock_header = (
+        request.headers.get("PayPal-Mock-Response")
+        or request.headers.get("paypal-mock-response")
+        or req.mock_response
+    )
+    if mock_header and PAYPAL_MODE != "sandbox":
+        logger.warning(f"PayPal-Mock-Response header blocked: forbidden in mode '{PAYPAL_MODE}'")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="PayPal-Mock-Response header is strictly forbidden when PAYPAL_MODE is not 'sandbox'",
+        )
+
+    # Idempotency check 1: return cached capture if already processed
+    if idempotency_key and idempotency_key in _idempotency_records:
+        logger.info(f"Returning cached capture for idempotency key: {idempotency_key}")
+        return _idempotency_records[idempotency_key]
+
+    if order_id in _captured_orders:
+        logger.info(f"Preventing double capture for order: {order_id}")
+        cached_res = _captured_orders[order_id]
+        duplicate_res = cached_res.model_copy(update={"already_captured": True, "duplicate_capture_prevented": True}) if hasattr(cached_res, "model_copy") else cached_res
+        if idempotency_key:
+            _idempotency_records[idempotency_key] = duplicate_res
+        return duplicate_res
 
     # If it's a live sandbox order
     if has_live_paypal_credentials() and not order_id.startswith("SBX-"):
@@ -457,8 +650,8 @@ async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Prefer": "return=representation",
+            "PayPal-Request-Id": idempotency_key or str(uuid.uuid4()),
         }
-        mock_header = request.headers.get("PayPal-Mock-Response") or request.headers.get("paypal-mock-response")
         if mock_header:
             headers["PayPal-Mock-Response"] = mock_header
 
@@ -473,8 +666,13 @@ async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
                 data = response.json()
 
                 status_str = data.get("status", "UNKNOWN")
+                # STRICT VERIFICATION: Never treat APPROVED as completed!
                 if status_str != "COMPLETED":
-                    logger.warning(f"PayPal capture order {order_id} returned status: {status_str}")
+                    logger.error(f"PayPal capture order {order_id} failed: status is '{status_str}', expected 'COMPLETED'.")
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Order capture incomplete: PayPal status is '{status_str}' (expected 'COMPLETED'). Never treating APPROVED as completed.",
+                    )
 
                 # Extract capture details
                 captures = (
@@ -482,10 +680,30 @@ async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
                     .get("payments", {})
                     .get("captures", [])
                 )
-                capture = captures[0] if captures else {}
+                if not captures:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Order {order_id} returned COMPLETED order status but missing capture details in payments.",
+                    )
+
+                capture = captures[0]
+                capture_status = capture.get("status", "UNKNOWN")
+                if capture_status != "COMPLETED":
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Capture record status is '{capture_status}', expected 'COMPLETED'.",
+                    )
+
                 capture_id = capture.get("id", f"CAP-{uuid.uuid4().hex[:10].upper()}")
                 captured_amount = float(capture.get("amount", {}).get("value", "0.0"))
                 captured_currency = capture.get("amount", {}).get("currency_code", DEFAULT_CURRENCY)
+                seller_breakdown = capture.get("seller_receivable_breakdown", {})
+                gross_amount = (
+                    float(seller_breakdown.get("gross_amount", {}).get("value"))
+                    if "gross_amount" in seller_breakdown
+                    else captured_amount
+                )
+                seller_protection_status = capture.get("seller_protection", {}).get("status", "NOT_ELIGIBLE")
 
                 # Extract payer details
                 payer = data.get("payer", {})
@@ -496,13 +714,15 @@ async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
 
                 create_time = capture.get("create_time") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-                logger.info(f"Successfully captured live PayPal order {order_id} -> Capture ID: {capture_id}")
-                return CaptureOrderResponse(
+                logger.info(f"Successfully captured live PayPal order {order_id} -> Capture ID: {capture_id}, Gross: {gross_amount} {captured_currency}")
+                res = CaptureOrderResponse(
                     order_id=order_id,
                     capture_id=capture_id,
-                    status=status_str,
+                    status="COMPLETED",
                     amount=captured_amount,
                     currency=captured_currency,
+                    gross_amount=gross_amount,
+                    seller_protection_status=seller_protection_status,
                     payer_email=payer_email,
                     payer_name=payer_name,
                     payer_id=payer_id,
@@ -510,6 +730,12 @@ async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
                     is_live_sandbox=True,
                     raw_details=data,
                 )
+                _captured_orders[order_id] = res
+                if idempotency_key:
+                    _idempotency_records[idempotency_key] = res
+                return res
+            except HTTPException:
+                raise
             except httpx.HTTPStatusError as e:
                 # Parse official PayPal error envelope (debug_id, details, issue)
                 try:
@@ -533,6 +759,25 @@ async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
                     detail=f"Failed to capture order: {str(e)}",
                 )
 
+    # Negative mock responses for simulated mode
+    if mock_header:
+        sim_debug_id = f"sbx_dbg_{uuid.uuid4().hex[:12]}"
+        sim_issue = extract_mock_issue_code(mock_header)
+        if sim_issue == "INSTRUMENT_DECLINED":
+            sim_desc = "The instrument presented was declined. Try a different payment method."
+        elif sim_issue == "DUPLICATE_INVOICE_ID":
+            sim_desc = "The invoice ID has been used on a previous payment."
+        else:
+            sim_desc = f"Simulated mock failure for {sim_issue}"
+
+        logger.error(
+            f"PayPal capture error envelope parsed: issue='{sim_issue}', debug_id='{sim_debug_id}', desc='{sim_desc}'"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"PayPal error [{sim_issue}] (debug_id: {sim_debug_id}): {sim_desc}",
+        )
+
     # Simulated order capture
     sim_order = _simulated_orders.get(order_id)
     if not sim_order and not order_id.startswith("SBX-"):
@@ -551,13 +796,17 @@ async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
 
     capture_id = "CAP-" + uuid.uuid4().hex[:12].upper()
     sim_order["capture_id"] = capture_id
+    sim_amount = sim_order.get("amount", 0.0)
+    sim_currency = sim_order.get("currency", DEFAULT_CURRENCY)
 
-    return CaptureOrderResponse(
+    res = CaptureOrderResponse(
         order_id=order_id,
         capture_id=capture_id,
         status="COMPLETED",
-        amount=sim_order.get("amount", 0.0),
-        currency=sim_order.get("currency", DEFAULT_CURRENCY),
+        amount=sim_amount,
+        currency=sim_currency,
+        gross_amount=sim_amount,
+        seller_protection_status="ELIGIBLE",
         payer_email="buyer-sandbox@personal.example.com",
         payer_name="PayPal Sandbox Buyer",
         payer_id="PAYER-" + uuid.uuid4().hex[:8].upper(),
@@ -565,9 +814,14 @@ async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
         is_live_sandbox=False,
         raw_details={"simulated": True, "order": sim_order},
     )
+    _captured_orders[order_id] = res
+    if idempotency_key:
+        _idempotency_records[idempotency_key] = res
+    return res
 
 
 @app.get("/api/v1/payments/paypal/order/{order_id}")
+@app.get("/api/paypal/order/{order_id}")
 async def get_paypal_order(order_id: str):
     """
     Retrieves real-time status and details of a PayPal Order.
@@ -728,7 +982,7 @@ async def recognize_product(req: RecognizeProductRequest):
                     brand=parsed.get("brand"),
                     category=parsed.get("category", "Electronics"),
                     estimated_price=parsed.get("estimated_price"),
-                    currency="INR",
+                    currency=DEFAULT_CURRENCY,
                     specifications=parsed.get("specifications", {}),
                     match_reason=parsed.get("match_reason", "Identified via Gemini 1.5 Flash multimodal vision."),
                     confidence=0.96,
@@ -771,12 +1025,13 @@ async def recognize_product(req: RecognizeProductRequest):
     if "nvme" in lower or "ssd" in lower:
         specs["Form Factor"] = "M.2 2280 NVMe"
 
+    fallback_price = 59.99 if DEFAULT_CURRENCY == "USD" else (5999.0 if DEFAULT_CURRENCY == "INR" else 49.99)
     return RecognizedProductResponse(
         title=text,
         brand=brand,
         category=category,
-        estimated_price=5999.0,
-        currency="INR",
+        estimated_price=fallback_price,
+        currency=DEFAULT_CURRENCY,
         specifications=specs,
         match_reason="Parsed using smart local product parser.",
         confidence=0.92,
