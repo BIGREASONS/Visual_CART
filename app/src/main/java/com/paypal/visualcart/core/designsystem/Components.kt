@@ -1,6 +1,7 @@
 package com.paypal.visualcart.core.designsystem
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -31,10 +33,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.paypal.visualcart.R
 import com.paypal.visualcart.domain.model.MatchType
 
 enum class ButtonVariant {
@@ -456,3 +461,79 @@ fun MerchantLogoBadge(
         }
     }
 }
+
+/**
+ * VisualCartLogo: Official Horizontal Logo from the brand identity.
+ * Features the Standalone Icon + "Visual" (Deep Ink with Terracotta 'i' dot) + "Cart" (Forest Green).
+ */
+@Composable
+fun VisualCartLogo(
+    modifier: Modifier = Modifier,
+    iconSize: Dp = 32.dp,
+    textSize: TextUnit = 22.sp,
+    isDarkTheme: Boolean = false
+) {
+    val primaryTextColor = if (isDarkTheme) PureWhite else DeepInk
+    val cartColor = if (isDarkTheme) SageLight else ForestGreen
+    val iconRes = if (isDarkTheme) R.drawable.ic_visual_cart_white else R.drawable.ic_visual_cart_icon
+
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Image(
+            painter = painterResource(id = iconRes),
+            contentDescription = "Visual Cart",
+            modifier = Modifier.size(iconSize)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            modifier = Modifier.padding(bottom = 1.dp)
+        ) {
+            Text(
+                text = "V",
+                color = primaryTextColor,
+                fontWeight = FontWeight.Bold,
+                fontSize = textSize,
+                lineHeight = textSize
+            )
+            // Lowercase 'i' with terracotta accent dot
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Bottom,
+                modifier = Modifier
+                    .padding(horizontal = 0.5.dp)
+                    .padding(bottom = 1.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size((textSize.value * 0.2f).dp)
+                        .background(Terracotta, CircleShape)
+                )
+                Spacer(modifier = Modifier.height((textSize.value * 0.12f).dp))
+                Box(
+                    modifier = Modifier
+                        .width((textSize.value * 0.16f).dp)
+                        .height((textSize.value * 0.44f).dp)
+                        .background(primaryTextColor, RoundedCornerShape(1.dp))
+                )
+            }
+            Text(
+                text = "sual ",
+                color = primaryTextColor,
+                fontWeight = FontWeight.Bold,
+                fontSize = textSize,
+                lineHeight = textSize
+            )
+            Text(
+                text = "Cart",
+                color = cartColor,
+                fontWeight = FontWeight.Bold,
+                fontSize = textSize,
+                lineHeight = textSize
+            )
+        }
+    }
+}
+

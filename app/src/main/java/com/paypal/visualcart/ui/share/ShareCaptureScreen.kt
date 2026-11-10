@@ -178,20 +178,11 @@ private fun ShareDialogHeader(onDismiss: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .background(ForestGreenLight),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = VisualCartIcons.Cart,
-                    contentDescription = null,
-                    tint = ForestGreen,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
+            Image(
+                painter = painterResource(id = R.drawable.ic_visual_cart_icon),
+                contentDescription = "Visual Cart",
+                modifier = Modifier.size(34.dp)
+            )
             Spacer(modifier = Modifier.width(10.dp))
             Column {
                 Text(

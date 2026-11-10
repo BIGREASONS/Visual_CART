@@ -1,0 +1,58 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <!-- Handle Accent Grip (Terracotta #C97858) -->
+    <path
+        android:pathData="M 7,11 H 12"
+        android:strokeColor="#C97858"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round" />
+
+    <!-- Slanted Cart Handle & Strut (Deep Ink #202B32) -->
+    <path
+        android:pathData="M 10.5,11 L 15.5,31"
+        android:strokeColor="#202B32"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Top Rail & Top-Right Viewfinder Bracket (Deep Ink #202B32) -->
+    <path
+        android:pathData="M 12.8,16 H 33 C 34.6,16 35.8,17.2 35.8,18.8 V 22.5"
+        android:strokeColor="#202B32"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Bottom Runner & Bottom-Right Viewfinder Bracket (Deep Ink #202B32) -->
+    <!-- Distinct aperture gap between Y=22.5 and Y=27.5 for viewfinder effect -->
+    <path
+        android:pathData="M 15.5,31 C 14.2,33.2 15.6,35.2 18,35.2 H 33 C 34.6,35.2 35.8,34 35.8,32.5 V 27.5"
+        android:strokeColor="#202B32"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Center Vision Aperture Dot (Forest Green #356B57) -->
+    <path
+        android:pathData="M 24.5,21.5 A 2.6,2.6 0 1,1 24.5,26.7 A 2.6,2.6 0 1,1 24.5,21.5"
+        android:fillColor="#356B57" />
+
+    <!-- Left Wheel (Terracotta #C97858 Donut Ring) -->
+    <path
+        android:pathData="M 17.5,37 A 3,3 0 1,1 17.5,43 A 3,3 0 1,1 17.5,37"
+        android:strokeColor="#C97858"
+        android:strokeWidth="2"
+        android:fillColor="#00000000" />
+
+    <!-- Right Wheel (Muted Sage #A6B5A0 Donut Ring) -->
+    <path
+        android:pathData="M 31,37 A 3,3 0 1,1 31,43 A 3,3 0 1,1 31,37"
+        android:strokeColor="#A6B5A0"
+        android:strokeWidth="2"
+        android:fillColor="#00000000" />
+
+</vector>

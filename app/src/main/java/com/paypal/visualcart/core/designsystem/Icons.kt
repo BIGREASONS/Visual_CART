@@ -19,35 +19,78 @@ object VisualCartIcons {
             name = "VisualCart",
             defaultWidth = 24.dp,
             defaultHeight = 24.dp,
-            viewportWidth = 24f,
-            viewportHeight = 24f
+            viewportWidth = 48f,
+            viewportHeight = 48f
         ).apply {
-            // Cart basket outline
+            // Handle Accent Grip (Terracotta #C97858)
             path(
-                stroke = SolidColor(Color.Black),
-                strokeLineWidth = 1.8f,
+                stroke = SolidColor(Color(0xFFC97858)),
+                strokeLineWidth = 2.8f,
+                strokeLineCap = StrokeCap.Round
+            ) {
+                moveTo(7f, 11f)
+                horizontalLineTo(12f)
+            }
+            // Slanted Cart Handle & Strut
+            path(
+                stroke = SolidColor(Color(0xFF202B32)),
+                strokeLineWidth = 2.6f,
                 strokeLineCap = StrokeCap.Round,
                 strokeLineJoin = StrokeJoin.Round
             ) {
-                moveTo(3f, 4f)
-                horizontalLineTo(5.2f)
-                lineTo(7.6f, 15f)
-                horizontalLineTo(18.5f)
-                lineTo(20.5f, 7f)
-                horizontalLineTo(6f)
+                moveTo(10.5f, 11f)
+                lineTo(15.5f, 31f)
             }
-            // Left wheel
-            path(fill = SolidColor(Color.Black)) {
-                moveTo(7f, 18.5f)
-                arcToRelative(1.5f, 1.5f, 0f, true, true, 3f, 0f)
-                arcToRelative(1.5f, 1.5f, 0f, true, true, -3f, 0f)
+            // Top Rail & Top-Right Viewfinder Bracket
+            path(
+                stroke = SolidColor(Color(0xFF202B32)),
+                strokeLineWidth = 2.6f,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round
+            ) {
+                moveTo(12.8f, 16f)
+                horizontalLineTo(33f)
+                curveTo(34.6f, 16f, 35.8f, 17.2f, 35.8f, 18.8f)
+                verticalLineTo(22.5f)
+            }
+            // Bottom Runner & Bottom-Right Viewfinder Bracket (Viewfinder aperture gap)
+            path(
+                stroke = SolidColor(Color(0xFF202B32)),
+                strokeLineWidth = 2.6f,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round
+            ) {
+                moveTo(15.5f, 31f)
+                curveTo(14.2f, 33.2f, 15.6f, 35.2f, 18f, 35.2f)
+                horizontalLineTo(33f)
+                curveTo(34.6f, 35.2f, 35.8f, 34f, 35.8f, 32.5f)
+                verticalLineTo(27.5f)
+            }
+            // Center Vision Aperture Dot (Forest Green #356B57)
+            path(fill = SolidColor(Color(0xFF356B57))) {
+                moveTo(24.5f, 21.5f)
+                arcToRelative(2.6f, 2.6f, 0f, true, true, 0f, 5.2f)
+                arcToRelative(2.6f, 2.6f, 0f, true, true, 0f, -5.2f)
                 close()
             }
-            // Right wheel
-            path(fill = SolidColor(Color.Black)) {
-                moveTo(16f, 18.5f)
-                arcToRelative(1.5f, 1.5f, 0f, true, true, 3f, 0f)
-                arcToRelative(1.5f, 1.5f, 0f, true, true, -3f, 0f)
+            // Left Wheel (Terracotta #C97858)
+            path(
+                stroke = SolidColor(Color(0xFFC97858)),
+                strokeLineWidth = 2f
+            ) {
+                moveTo(17.5f, 37f)
+                arcToRelative(3f, 3f, 0f, true, true, 0f, 6f)
+                arcToRelative(3f, 3f, 0f, true, true, 0f, -6f)
+                close()
+            }
+            // Right Wheel (Muted Sage #A6B5A0)
+            path(
+                stroke = SolidColor(Color(0xFFA6B5A0)),
+                strokeLineWidth = 2f
+            ) {
+                moveTo(31f, 37f)
+                arcToRelative(3f, 3f, 0f, true, true, 0f, 6f)
+                arcToRelative(3f, 3f, 0f, true, true, 0f, -6f)
                 close()
             }
         }.build()

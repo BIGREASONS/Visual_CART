@@ -77,6 +77,7 @@ import com.paypal.visualcart.core.designsystem.TerracottaLight
 import com.paypal.visualcart.core.designsystem.VisualCartButton
 import com.paypal.visualcart.core.designsystem.VisualCartCard
 import com.paypal.visualcart.core.designsystem.VisualCartIcons
+import com.paypal.visualcart.core.designsystem.VisualCartLogo
 import com.paypal.visualcart.core.designsystem.VisualCartTypography
 import com.paypal.visualcart.core.designsystem.WarmIvory
 import com.paypal.visualcart.domain.model.AvailabilityStatus
@@ -204,7 +205,7 @@ fun HomeScreen(
                 .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
         ) {
-            // Editorial Header Bar
+            // Editorial Header Bar with Official Brand Logo
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -212,24 +213,7 @@ fun HomeScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(
-                        text = "Good morning.",
-                        style = VisualCartTypography.headlineSmall.copy(
-                            color = MutedSlate,
-                            fontWeight = FontWeight.Medium
-                        )
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "Your next great find\nstarts anywhere.",
-                        style = VisualCartTypography.headlineLarge.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = DeepInk,
-                            lineHeight = 30.sp
-                        )
-                    )
-                }
+                VisualCartLogo(iconSize = 30.dp, textSize = 22.sp)
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
@@ -252,16 +236,38 @@ fun HomeScreen(
                         modifier = Modifier
                             .size(42.dp)
                             .clip(CircleShape)
-                            .background(ForestGreen)
+                            .background(PureWhite)
                     ) {
                         Icon(
                             imageVector = VisualCartIcons.Cart,
                             contentDescription = "Cart",
-                            tint = PureWhite,
+                            tint = DeepInk,
                             modifier = Modifier.size(20.dp)
                         )
                     }
                 }
+            }
+
+            // Welcome Subtitle
+            Column(
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = "Good morning.",
+                    style = VisualCartTypography.headlineSmall.copy(
+                        color = MutedSlate,
+                        fontWeight = FontWeight.Medium
+                    )
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Your next great find\nstarts anywhere.",
+                    style = VisualCartTypography.headlineLarge.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = DeepInk,
+                        lineHeight = 30.sp
+                    )
+                )
             }
 
             Spacer(modifier = Modifier.height(12.dp))

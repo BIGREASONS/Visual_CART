@@ -246,4 +246,48 @@ Visual Cart implements an intelligent dual-path routing engine (`PayPalSandboxPa
    All integrated transactions explicitly highlight PayPal Buyer Protection coverage, increasing buyer confidence.
 
 ---
+
+## 8. Official PayPal Developer Sandbox Verification Guide
+
+Following the official PayPal Developer guidelines ([paypaldev/getting-started-with-paypal-sandbox](https://github.com/paypaldev/getting-started-with-paypal-sandbox)):
+
+### 8.1 Sandbox Accounts Setup
+1. **Developer Dashboard**: Log in to [developer.paypal.com](https://developer.paypal.com) using your primary PayPal account.
+2. **Access Test Accounts**: Navigate to **Testing Tools** &rarr; **Sandbox Accounts** (`developer.paypal.com/dashboard/accounts`).
+   - A **Business Account** (`sb-xxxx-biz@business.example.com`): Represents the merchant receiving payments.
+   - A **Personal Account** (`sb-xxxx-buyer@personal.example.com`): Represents the shopper purchasing items with fake sandbox money.
+3. **App Credentials**: Under **Apps & Credentials** &rarr; **Sandbox**, copy the `Client ID` and `Secret` into `.env`:
+   ```bash
+   PAYPAL_CLIENT_ID=your_sandbox_client_id
+   PAYPAL_CLIENT_SECRET=your_sandbox_secret
+   PAYPAL_ENVIRONMENT=sandbox
+   ```
+
+### 8.2 End-to-End Buyer Approval & Capture Flow
+1. **Create Order**: Client calls `POST /api/v1/payments/paypal/create-order` with the selected item.
+2. **Buyer Approval**: Android app opens PayPal sandbox checkout (`https://www.sandbox.paypal.com/checkoutnow?token=ORDER_ID`) in Chrome Custom Tabs.
+   - Log in with the **Personal Sandbox Account** credentials.
+   - Tap **Complete Purchase** to approve.
+3. **Redirect & Capture**: Custom Tabs redirects to `visualcart://paypal-return?token=ORDER_ID&PayerID=PAYER_ID`. The backend captures payment via `POST /v2/checkout/orders/{id}/capture` and returns a real PayPal Capture ID (`CAP-XXXXXXXXXX`).
+
+### 8.3 Verifying Settlement in PayPal Sandbox Portal
+To verify the transaction settled with fake funds:
+1. Open [www.sandbox.paypal.com](https://www.sandbox.paypal.com).
+2. Log in using the **Business Account** (`sb-xxxx-biz@business.example.com`).
+3. View **Recent Activity** and **PayPal Balance**:
+   - The captured payment appears with the exact gross amount, transaction fee, and net balance increase.
+   - Click the transaction to inspect the PayPal Capture ID matching the one displayed in Visual Cart.
+
+### 8.4 Negative Testing & Mock Responses
+To test how the mobile app handles payment declines and instrument issues:
+1. Provide the `PayPal-Mock-Response` header in the backend:
+   ```json
+   {
+     "mock_application_codes": "INSTRUMENT_DECLINED"
+   }
+   ```
+2. The PayPal Sandbox API returns HTTP 422 with issue `INSTRUMENT_DECLINED` and `debug_id`.
+3. The Visual Cart backend and Android app parse the error envelope, display a user-friendly recovery prompt ("Payment instrument was declined. Please choose a different payment method on PayPal."), and allow the buyer to retry seamlessly.
+
+---
 *End of PayPal Integration Documentation.*
