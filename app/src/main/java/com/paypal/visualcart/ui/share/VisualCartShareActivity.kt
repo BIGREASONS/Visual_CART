@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -30,9 +31,11 @@ import com.paypal.visualcart.domain.model.RecognitionSource
 import com.paypal.visualcart.domain.model.RecognitionStatus
 import com.paypal.visualcart.feature.ai.GeminiFreeVisionProvider
 import com.paypal.visualcart.feature.ai.LocalProductParser
+import com.paypal.visualcart.feature.circle.CircleToShopSessionStore
 import com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine
 import com.paypal.visualcart.feature.merchant.ProductUrlExtractor
 import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
+import com.paypal.visualcart.service.capture.CircleToShopConsentActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -56,6 +59,11 @@ class VisualCartShareActivity : ComponentActivity() {
     private var lastCapturedThumbnail: Bitmap? = null
     private var lastRawShareUri: Uri? = null
     private var lastShareContextText: String? = null
+    private var lastCircleCropPath: String? = null
+    private var lastCaptureWasCircleToShop: Boolean = false
+
+    private fun hasRetryableCaptureSource(): Boolean =
+        lastRawShareUri != null || !lastCircleCropPath.isNullOrBlank()
 
     private var uiState by mutableStateOf<ShareCaptureUiState>(
         ShareCaptureUiState.Loading(statusMessage = "Receiving shared product…")
@@ -100,15 +108,25 @@ class VisualCartShareActivity : ComponentActivity() {
                             suggestedQuery = currentTitle,
                             imageUri = lastCapturedImageUri,
                             candidates = (current as? ShareCaptureUiState.Matched)?.product?.candidates ?: emptyList(),
-                            canRetry = lastRawShareUri != null,
-                            detectedCategory = (current as? ShareCaptureUiState.Matched)?.product?.category
+                            canRetry = hasRetryableCaptureSource(),
+                            detectedCategory = (current as? ShareCaptureUiState.Matched)?.product?.category,
+                            isCircleCapture = lastCaptureWasCircleToShop
                         )
                     },
                     onRetryRecognition = {
+                        val circlePath = lastCircleCropPath
                         val retryUri = lastRawShareUri
-                        if (retryUri != null) {
-                            handleSharedImage(retryUri, lastShareContextText)
+                        when {
+                            lastCaptureWasCircleToShop && !circlePath.isNullOrBlank() -> {
+                                retryCircleCropRecognition(circlePath)
+                            }
+                            retryUri != null -> {
+                                handleSharedImage(retryUri, lastShareContextText)
+                            }
                         }
+                    },
+                    onCircleAgain = {
+                        relaunchCircleToShop()
                     },
                     onOpenSettings = {
                         val intent = Intent(this@VisualCartShareActivity, MainActivity::class.java).apply {
@@ -187,6 +205,12 @@ class VisualCartShareActivity : ComponentActivity() {
                     uiState = ShareCaptureUiState.Error("No valid image found in selection.")
                 }
             }
+            ACTION_CIRCLE_CROP_RESULT -> {
+                handleCircleCropToken(intent.getStringExtra(EXTRA_CIRCLE_CAPTURE_TOKEN))
+            }
+            ACTION_CIRCLE_MANUAL_FALLBACK -> {
+                handleCircleManualFallback(intent.getStringExtra(EXTRA_CIRCLE_ERROR_MESSAGE))
+            }
             else -> {
                 uiState = ShareCaptureUiState.Error("Unsupported action: ${intent.action}")
             }
@@ -206,6 +230,8 @@ class VisualCartShareActivity : ComponentActivity() {
         val cleanHint = contextText?.takeIf { !SearchQueryBuilder.isNonProductNoise(it) }
         lastRawShareUri = uri
         lastShareContextText = cleanHint
+        lastCircleCropPath = null
+        lastCaptureWasCircleToShop = false
 
         uiState = ShareCaptureUiState.Loading(
             statusMessage = "Reading shared image bytes…",
@@ -236,114 +262,292 @@ class VisualCartShareActivity : ComponentActivity() {
                 "Copied capture scheme=${uri.scheme} mime=${captureResult.mimeType} bytes=${captureResult.byteSize} dim=${captureResult.width}x${captureResult.height}"
             )
 
-            val thumbnail: Bitmap? = SafeImageDecoder.decodeThumbnail(captureResult.file, maxDimension = 720)
-            val resolvedPath = captureResult.file.absolutePath
-            lastCapturedImageUri = resolvedPath
-            lastCapturedThumbnail = thumbnail
-
-            withContext(Dispatchers.Main) {
-                uiState = ShareCaptureUiState.Loading(
-                    thumbnail = thumbnail,
-                    statusMessage = "Identifying product visually…",
-                    detectedHint = cleanHint
-                )
-            }
-
-            // 2. Query product understanding provider with real file path (never raw filename hints)
-            val recognized = recognitionProvider.recognizeFromImage(
-                imageUri = resolvedPath,
-                contextText = cleanHint
+            recognizeAndDiscoverFromLocalImage(
+                imageFile = captureResult.file,
+                cleanHint = cleanHint
             )
-            Log.i(
-                "VisualCartAI",
-                "Recognized status=${recognized.status} source=${recognized.recognitionSource} model=${recognized.aiModelName} category=${recognized.category} query=${recognized.searchQuery.ifBlank { recognized.title }}"
-            )
+        }
+    }
 
-            val queryBuildResult = SearchQueryBuilder.build(
-                SearchQueryBuilder.Input.fromRecognizedProduct(recognized)
-            )
-            val isUnidentified = recognized.status == RecognitionStatus.UNIDENTIFIED ||
-                recognized.category.equals("Unidentified", ignoreCase = true) ||
-                queryBuildResult is SearchQueryBuilder.Result.Rejected
+    private fun handleCircleCropToken(captureToken: String?) {
+        lastRawShareUri = null
+        lastShareContextText = null
+        lastCircleCropPath = null
+        lastCaptureWasCircleToShop = true
+        lastCapturedImageUri = null
+        lastCapturedThumbnail = null
 
-            if (isUnidentified) {
-                val suggested = recognized.candidates.firstOrNull()?.searchQuery
-                    ?: cleanHint.orEmpty()
+        val token = captureToken?.trim().orEmpty()
+        if (token.isEmpty()) {
+            openCircleManualFallback("No circled capture was received. Enter the product name manually below.")
+            return
+        }
+
+        val artifact = CircleToShopSessionStore.consumeCroppedArtifact(token)
+        if (artifact == null || !isSafeCircleArtifact(artifact.file, artifact.byteSize)) {
+            Log.w("VisualCartCapture", "Rejected missing or unsafe Circle to Shop artifact")
+            openCircleManualFallback("Could not safely load the circled capture. Enter the product name manually below.")
+            return
+        }
+
+        val file = artifact.file
+        lastCircleCropPath = file.absolutePath
+        lastCaptureWasCircleToShop = true
+        launchCircleCropRecognition(
+            file = file,
+            loadingThumbnail = null,
+            loadingMessage = "Processing circled product…",
+            invalidMimeMessage = "Circled image could not be verified. Enter the product name manually below.",
+            logMetadata = "bytes=${artifact.byteSize} dim=${artifact.width}x${artifact.height}"
+        )
+    }
+
+    private fun retryCircleCropRecognition(circlePath: String) {
+        val file = File(circlePath)
+        if (!isSafeCircleArtifact(file, file.length())) {
+            lastCircleCropPath = null
+            lastCaptureWasCircleToShop = true
+            openCircleManualFallback("Circled capture expired or is unavailable. Enter the product name manually below.")
+            return
+        }
+
+        launchCircleCropRecognition(
+            file = file,
+            loadingThumbnail = lastCapturedThumbnail,
+            loadingMessage = "Retrying visual recognition…",
+            invalidMimeMessage = "Circled image could not be verified. Enter the product name manually below."
+        )
+    }
+
+    private fun launchCircleCropRecognition(
+        file: File,
+        loadingThumbnail: Bitmap?,
+        loadingMessage: String,
+        invalidMimeMessage: String,
+        logMetadata: String? = null
+    ) {
+        uiState = ShareCaptureUiState.Loading(
+            thumbnail = loadingThumbnail,
+            statusMessage = loadingMessage,
+            isCircleCapture = true
+        )
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val verifiedMime = readVerifiedMimeType(file)
+            if (verifiedMime == null) {
+                Log.w("VisualCartCapture", "Circle to Shop artifact failed SafeImageDecoder MIME verification")
                 withContext(Dispatchers.Main) {
-                    uiState = ShareCaptureUiState.NeedsQuery(
-                        thumbnail = thumbnail,
-                        message = recognized.diagnosticNote ?: recognized.matchReason.ifBlank {
-                            "Could not reliably identify this product from the image. Confirm a candidate or enter the product name."
-                        },
-                        suggestedQuery = suggested,
-                        imageUri = resolvedPath,
-                        candidates = recognized.candidates,
-                        canRetry = true,
-                        detectedCategory = recognized.category,
-                        rateLimited = recognized.rateLimited,
-                        showSettingsAction = !recognized.rateLimited
-                    )
+                    lastCircleCropPath = null
+                    lastCaptureWasCircleToShop = true
+                    openCircleManualFallback(invalidMimeMessage)
                 }
                 return@launch
             }
 
-            // 3. Search multi-merchant discovery engine (live captures never mix DemoMerchantFixtures)
-            val engine = if (recognized.recognitionSource == RecognitionSource.DEMO && recognized.isDemoFixture) {
-                demoMerchantEngine
-            } else {
-                liveMerchantEngine
+            if (logMetadata != null) {
+                Log.i("VisualCartCapture", "Circle crop ready mime=$verifiedMime $logMetadata")
             }
-            val discovery = engine.discoverStructured(recognized)
-            val combined = engine.deduplicateListings(
-                discovery.exactMatches + discovery.similarAlternatives + discovery.searchLinks
-            )
-            val (bestListing, exactListings, similarListings, summary) = partitionListings(
-                recognized.searchQuery.ifBlank { recognized.title },
-                combined,
-                engine
-            )
-            val isUncertain = recognized.status == RecognitionStatus.PARTIAL ||
-                recognized.candidates.size > 1 ||
-                recognized.confidence < 0.65f
 
+            recognizeAndDiscoverFromLocalImage(
+                imageFile = file,
+                cleanHint = null
+            )
+        }
+    }
+
+    private fun handleCircleManualFallback(rawError: String?) {
+        lastRawShareUri = null
+        lastShareContextText = null
+        lastCircleCropPath = null
+        lastCaptureWasCircleToShop = true
+        lastCapturedImageUri = null
+        lastCapturedThumbnail = null
+
+        val errorMsg = SecurityUtils.sanitizeUserInput(rawError).ifBlank {
+            "Screen capture was unavailable or protected. Enter the product name manually to search live stores."
+        }
+        openCircleManualFallback(errorMsg)
+    }
+
+    private fun openCircleManualFallback(message: String) {
+        uiState = ShareCaptureUiState.NeedsQuery(
+            thumbnail = null,
+            message = message,
+            suggestedQuery = "",
+            imageUri = null,
+            candidates = emptyList(),
+            canRetry = false,
+            detectedCategory = null,
+            rateLimited = false,
+            showSettingsAction = false,
+            isCircleCapture = true
+        )
+    }
+
+    private fun relaunchCircleToShop() {
+        if (Settings.canDrawOverlays(this)) {
+            startActivity(CircleToShopConsentActivity.createLaunchIntent(this))
+        } else {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                action = MainActivity.ACTION_CAPTURE
+                putExtra(MainActivity.EXTRA_CAPTURE_TYPE, MainActivity.CAPTURE_TYPE_CIRCLE_TO_SHOP)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            startActivity(intent)
+        }
+        finish()
+    }
+
+    private fun isSafeCircleArtifact(file: File, byteSize: Long): Boolean {
+        return try {
+            val allowedRoot = File(cacheDir, "shared_captures").canonicalPath + File.separator
+            file.exists() &&
+                file.isFile &&
+                byteSize > 0L &&
+                file.length() > 0L &&
+                file.canonicalPath.startsWith(allowedRoot)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun readVerifiedMimeType(file: File): String? {
+        return try {
+            val header = ByteArray(64)
+            val readCount = file.inputStream().use { input -> input.read(header) }
+            if (readCount <= 0) null else SafeImageDecoder.detectMimeTypeFromBytes(header.copyOf(readCount))
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Shared recognition + merchant matching pipeline for any verified local image file
+     * (incoming sharesheet captures and Circle to Shop cropped frames).
+     */
+    private suspend fun recognizeAndDiscoverFromLocalImage(
+        imageFile: File,
+        cleanHint: String?
+    ) {
+        val thumbnail: Bitmap? = SafeImageDecoder.decodeThumbnail(imageFile, maxDimension = 720)
+        val resolvedPath = imageFile.absolutePath
+        lastCapturedImageUri = resolvedPath
+        lastCapturedThumbnail = thumbnail
+
+        withContext(Dispatchers.Main) {
+            uiState = ShareCaptureUiState.Loading(
+                thumbnail = thumbnail,
+                statusMessage = "Identifying product visually…",
+                detectedHint = cleanHint,
+                isCircleCapture = lastCaptureWasCircleToShop
+            )
+        }
+
+        // Query product understanding provider with real file path (never raw filename hints)
+        val recognized = recognitionProvider.recognizeFromImage(
+            imageUri = resolvedPath,
+            contextText = cleanHint
+        )
+        Log.i(
+            "VisualCartAI",
+            "Recognized status=${recognized.status} source=${recognized.recognitionSource} model=${recognized.aiModelName} category=${recognized.category} query=${recognized.searchQuery.ifBlank { recognized.title }}"
+        )
+
+        val queryBuildResult = SearchQueryBuilder.build(
+            SearchQueryBuilder.Input.fromRecognizedProduct(recognized)
+        )
+        val isUnidentified = recognized.status == RecognitionStatus.UNIDENTIFIED ||
+            recognized.category.equals("Unidentified", ignoreCase = true) ||
+            queryBuildResult is SearchQueryBuilder.Result.Rejected ||
+            (recognized.rateLimited && cleanHint.isNullOrBlank())
+
+        if (isUnidentified) {
+            val suggested = recognized.candidates.firstOrNull()?.searchQuery
+                ?: cleanHint.orEmpty()
+            val message = when {
+                recognized.rateLimited -> GeminiFreeVisionProvider.RATE_LIMIT_MESSAGE
+                !recognized.diagnosticNote.isNullOrBlank() -> recognized.diagnosticNote
+                recognized.matchReason.isNotBlank() -> recognized.matchReason
+                else -> "Could not reliably identify this product from the image. Confirm a candidate or enter the product name."
+            }
             withContext(Dispatchers.Main) {
-                if (bestListing != null) {
-                    uiState = ShareCaptureUiState.Matched(
-                        product = recognized.copy(imageUrl = resolvedPath),
-                        thumbnail = thumbnail,
-                        bestListing = bestListing,
-                        exactListings = exactListings,
-                        similarListings = similarListings,
-                        selectedListing = bestListing,
-                        comparisonSummary = summary,
-                        isUncertain = isUncertain
-                    )
-                } else {
-                    val reasonMessage = when (discovery.rejectedReason) {
-                        SearchQueryBuilder.RejectionReason.FILENAME_OR_EXTENSION,
-                        SearchQueryBuilder.RejectionReason.CAPTURE_TIMESTAMP,
-                        SearchQueryBuilder.RejectionReason.INTERNAL_OR_NUMERIC_ID,
-                        SearchQueryBuilder.RejectionReason.URI_OR_PATH ->
-                            "Only a generic capture filename or internal ID was found. Enter the product name to search real stores."
-                        SearchQueryBuilder.RejectionReason.EMPTY_OR_BLANK,
-                        SearchQueryBuilder.RejectionReason.FALLBACK_NOISE_ONLY,
-                        SearchQueryBuilder.RejectionReason.NO_PRODUCT_IDENTITY ->
-                            "Could not determine a specific product name from this image. Enter the product name manually."
-                        null ->
-                            "No clean store search query could be formed for this item. Enter the product name manually."
-                    }
-                    uiState = ShareCaptureUiState.NeedsQuery(
-                        thumbnail = thumbnail,
-                        message = recognized.diagnosticNote?.takeIf { recognized.rateLimited } ?: reasonMessage,
-                        suggestedQuery = cleanHint.orEmpty(),
-                        imageUri = resolvedPath,
-                        candidates = recognized.candidates,
-                        canRetry = true,
-                        detectedCategory = recognized.category,
-                        rateLimited = recognized.rateLimited,
-                        showSettingsAction = !recognized.rateLimited
-                    )
+                uiState = ShareCaptureUiState.NeedsQuery(
+                    thumbnail = thumbnail,
+                    message = message,
+                    suggestedQuery = suggested,
+                    imageUri = resolvedPath,
+                    candidates = recognized.candidates,
+                    canRetry = hasRetryableCaptureSource(),
+                    detectedCategory = recognized.category,
+                    rateLimited = recognized.rateLimited,
+                    showSettingsAction = !recognized.rateLimited,
+                    isCircleCapture = lastCaptureWasCircleToShop
+                )
+            }
+            return
+        }
+
+        // Search multi-merchant discovery engine (live captures never mix DemoMerchantFixtures)
+        val engine = if (!lastCaptureWasCircleToShop &&
+            recognized.recognitionSource == RecognitionSource.DEMO &&
+            recognized.isDemoFixture
+        ) {
+            demoMerchantEngine
+        } else {
+            liveMerchantEngine
+        }
+        val discovery = engine.discoverStructured(recognized)
+        val combined = engine.deduplicateListings(
+            discovery.exactMatches + discovery.similarAlternatives + discovery.searchLinks
+        )
+        val (bestListing, exactListings, similarListings, summary) = partitionListings(
+            recognized.searchQuery.ifBlank { recognized.title },
+            combined,
+            engine
+        )
+        val isUncertain = recognized.status == RecognitionStatus.PARTIAL ||
+            recognized.candidates.size > 1 ||
+            recognized.confidence < 0.65f
+
+        withContext(Dispatchers.Main) {
+            if (bestListing != null) {
+                uiState = ShareCaptureUiState.Matched(
+                    product = recognized.copy(imageUrl = resolvedPath),
+                    thumbnail = thumbnail,
+                    bestListing = bestListing,
+                    exactListings = exactListings,
+                    similarListings = similarListings,
+                    selectedListing = bestListing,
+                    comparisonSummary = summary,
+                    isUncertain = isUncertain,
+                    isCircleCapture = lastCaptureWasCircleToShop
+                )
+            } else {
+                val reasonMessage = when (discovery.rejectedReason) {
+                    SearchQueryBuilder.RejectionReason.FILENAME_OR_EXTENSION,
+                    SearchQueryBuilder.RejectionReason.CAPTURE_TIMESTAMP,
+                    SearchQueryBuilder.RejectionReason.INTERNAL_OR_NUMERIC_ID,
+                    SearchQueryBuilder.RejectionReason.URI_OR_PATH ->
+                        "Only a generic capture filename or internal ID was found. Enter the product name to search real stores."
+                    SearchQueryBuilder.RejectionReason.EMPTY_OR_BLANK,
+                    SearchQueryBuilder.RejectionReason.FALLBACK_NOISE_ONLY,
+                    SearchQueryBuilder.RejectionReason.NO_PRODUCT_IDENTITY ->
+                        "Could not determine a specific product name from this image. Enter the product name manually."
+                    null ->
+                        "No clean store search query could be formed for this item. Enter the product name manually."
                 }
+                uiState = ShareCaptureUiState.NeedsQuery(
+                    thumbnail = thumbnail,
+                    message = recognized.diagnosticNote?.takeIf { recognized.rateLimited } ?: reasonMessage,
+                    suggestedQuery = cleanHint.orEmpty(),
+                    imageUri = resolvedPath,
+                    candidates = recognized.candidates,
+                    canRetry = hasRetryableCaptureSource(),
+                    detectedCategory = recognized.category,
+                    rateLimited = recognized.rateLimited,
+                    showSettingsAction = !recognized.rateLimited,
+                    isCircleCapture = lastCaptureWasCircleToShop
+                )
             }
         }
     }
@@ -357,7 +561,8 @@ class VisualCartShareActivity : ComponentActivity() {
                 message = "Please enter a specific product name (for example: PVC Plastic Pipes, Sony headphones, Nike shoes).",
                 suggestedQuery = "",
                 imageUri = lastCapturedImageUri,
-                canRetry = lastRawShareUri != null
+                canRetry = hasRetryableCaptureSource(),
+                isCircleCapture = lastCaptureWasCircleToShop
             )
             return
         }
@@ -366,7 +571,8 @@ class VisualCartShareActivity : ComponentActivity() {
         uiState = ShareCaptureUiState.Loading(
             thumbnail = lastCapturedThumbnail,
             statusMessage = "Searching stores for \"$verifiedQuery\"…",
-            detectedHint = verifiedQuery.take(60)
+            detectedHint = verifiedQuery.take(60),
+            isCircleCapture = lastCaptureWasCircleToShop
         )
 
         lifecycleScope.launch(Dispatchers.IO) {
@@ -404,7 +610,8 @@ class VisualCartShareActivity : ComponentActivity() {
                         similarListings = similarListings,
                         selectedListing = bestListing,
                         comparisonSummary = summary,
-                        isUncertain = false
+                        isUncertain = false,
+                        isCircleCapture = lastCaptureWasCircleToShop
                     )
                 } else {
                     uiState = ShareCaptureUiState.Error("No matching store listings found for $verifiedQuery")
@@ -420,6 +627,8 @@ class VisualCartShareActivity : ComponentActivity() {
         lastCapturedImageUri = null
         lastCapturedThumbnail = null
         lastRawShareUri = null
+        lastCircleCropPath = null
+        lastCaptureWasCircleToShop = false
 
         uiState = ShareCaptureUiState.Loading(
             statusMessage = "Analyzing product link…",
@@ -585,5 +794,12 @@ class VisualCartShareActivity : ComponentActivity() {
         } catch (_: Exception) {
             // Browser unavailable
         }
+    }
+
+    companion object {
+        const val ACTION_CIRCLE_CROP_RESULT = "com.paypal.visualcart.action.CIRCLE_CROP_RESULT"
+        const val EXTRA_CIRCLE_CAPTURE_TOKEN = "extra_circle_capture_token"
+        const val ACTION_CIRCLE_MANUAL_FALLBACK = "com.paypal.visualcart.action.CIRCLE_MANUAL_FALLBACK"
+        const val EXTRA_CIRCLE_ERROR_MESSAGE = "extra_circle_error_message"
     }
 }

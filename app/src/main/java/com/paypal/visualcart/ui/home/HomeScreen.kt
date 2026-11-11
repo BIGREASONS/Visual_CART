@@ -42,6 +42,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -116,17 +117,7 @@ fun HomeScreen(
 ) {
     val context = LocalContext.current
     var showAddCaptureDialog by remember { mutableStateOf(false) }
-    var floatingBubbleEnabled by remember { mutableStateOf(VisualCartOverlayService.isRunning) }
-    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
-    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                floatingBubbleEnabled = VisualCartOverlayService.isRunning
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
+    val floatingBubbleEnabled by VisualCartOverlayService.isRunningFlow.collectAsState()
     var selectedCategoryFilter by remember { mutableStateOf<String?>(null) }
 
     val recentItems = remember {
@@ -413,7 +404,6 @@ fun HomeScreen(
                                     )
                                     context.startActivity(intent)
                                 } else {
-                                    floatingBubbleEnabled = isChecked
                                     if (isChecked) {
                                         VisualCartOverlayService.start(context)
                                     } else {

@@ -13,6 +13,8 @@ sealed class CaptureIntentEvent(
     data class SharedUrl(val url: String) : CaptureIntentEvent()
     data class SharedImage(val uri: Uri) : CaptureIntentEvent()
     data class TriggerCapture(val captureType: String) : CaptureIntentEvent()
+    data class CircleToShopCaptured(val captureToken: String) : CaptureIntentEvent()
+    data object StartCircleToShop : CaptureIntentEvent()
     data class ShowProductMatch(val result: DetectedProductMatchResult) : CaptureIntentEvent()
     data object OpenCart : CaptureIntentEvent()
     data object OpenSettings : CaptureIntentEvent()

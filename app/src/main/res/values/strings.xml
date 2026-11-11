@@ -23,4 +23,18 @@
     <string name="saved_to_visual_cart">Saved to your Visual Cart!</string>
     <string name="view_in_cart">View in Cart</string>
     <string name="done_action">Done</string>
+
+    <!-- Circle to Shop -->
+    <string name="action_circle_to_shop">Circle to Shop</string>
+    <string name="circle_to_shop_badge">NEW</string>
+    <string name="circle_to_shop_tag">CIRCLE</string>
+    <string name="circle_to_shop_capture_notif_title">Circle to Shop active</string>
+    <string name="circle_to_shop_capture_notif_text">Screen capture active · Circle any product or tap Stop</string>
+    <string name="circle_to_shop_stop_action">Stop capture</string>
+    <string name="circle_to_shop_instruction">Circle anything you want to find.</string>
+    <string name="circle_to_shop_clear">Clear</string>
+    <string name="circle_to_shop_cancel">Cancel</string>
+    <string name="circle_to_shop_consent_title">Enable Circle to Shop</string>
+    <string name="circle_to_shop_consent_body">Android asks for one-time screen capture permission so UniCart can crop only the product you circle. Protected apps (FLAG_SECURE) are respected, the full frame is discarded immediately after cropping, and capture stops automatically.</string>
+    <string name="circle_to_shop_consent_allow">Continue &amp; Allow Capture</string>
 </resources>

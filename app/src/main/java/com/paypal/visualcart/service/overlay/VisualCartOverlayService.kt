@@ -8,10 +8,13 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
@@ -27,16 +30,28 @@ import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.paypal.visualcart.MainActivity
 import com.paypal.visualcart.R
+import com.paypal.visualcart.feature.circle.CircleToShopSessionStore
+import com.paypal.visualcart.feature.circle.OverlayCapturePreferences
+import com.paypal.visualcart.service.capture.CircleToShopConsentActivity
 import com.paypal.visualcart.service.tile.VisualCartTileService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlin.math.hypot
 
 /**
  * Floating Overlay Service for PayPal Visual Cart.
  * Displays a 56dp Forest Green circular button that snaps to screen edges and
- * offers quick capture options (Screenshot, Paste link, Open cart, Hide).
+ * offers quick capture options (Circle to Shop, Screenshot, Paste link, Open cart, Hide).
  */
 class VisualCartOverlayService : Service() {
 
@@ -48,6 +63,7 @@ class VisualCartOverlayService : Service() {
     private var popupLayoutParams: WindowManager.LayoutParams? = null
 
     private var snapAnimator: ValueAnimator? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -60,11 +76,13 @@ class VisualCartOverlayService : Service() {
         }
 
         isRunning = true
+        _isRunningFlow.value = true
         VisualCartTileService.requestTileUpdate(this)
 
         startForegroundNotification()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         initBubbleView()
+        observeCaptureBubbleVisibility()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -76,6 +94,7 @@ class VisualCartOverlayService : Service() {
         when (intent?.action) {
             ACTION_STOP_OVERLAY -> {
                 Log.d(TAG, "Received ACTION_STOP_OVERLAY. Stopping service.")
+                OverlayCapturePreferences.setBubbleAutoStartEnabled(this, false)
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -87,8 +106,10 @@ class VisualCartOverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        _isRunningFlow.value = false
         VisualCartTileService.requestTileUpdate(this)
 
+        serviceScope.cancel()
         snapAnimator?.cancel()
         dismissCapturePopup()
 
@@ -335,7 +356,21 @@ class VisualCartOverlayService : Service() {
         }
     }
 
+    private fun observeCaptureBubbleVisibility() {
+        serviceScope.launch {
+            CircleToShopSessionStore.isBubbleHiddenForCapture.collect { hidden ->
+                if (hidden) {
+                    dismissCapturePopup()
+                    bubbleContainer?.visibility = View.GONE
+                } else {
+                    bubbleContainer?.visibility = View.VISIBLE
+                }
+            }
+        }
+    }
+
     private fun showCapturePopup() {
+        if (CircleToShopSessionStore.isBubbleHiddenForCapture.value) return
         val wm = windowManager ?: return
         val bubble = bubbleContainer ?: return
         val bParams = bubbleLayoutParams ?: return
@@ -362,7 +397,8 @@ class VisualCartOverlayService : Service() {
         } else {
             bParams.x - popupWidth - dpToPx(8)
         }
-        val popupY = (bParams.y - dpToPx(20)).coerceAtLeast(dpToPx(40))
+        val maxPopupY = (getScreenHeight() - dpToPx(310)).coerceAtLeast(dpToPx(40))
+        val popupY = (bParams.y - dpToPx(20)).coerceIn(dpToPx(40), maxPopupY)
 
         val pParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -386,6 +422,19 @@ class VisualCartOverlayService : Service() {
             } else {
                 false
             }
+        }
+
+        // Action 0: Circle to Shop
+        popup.findViewById<TextView>(R.id.badge_circle_to_shop)?.apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dpToPx(6).toFloat()
+                setColor(Color.parseColor("#E8F1EC"))
+            }
+        }
+        popup.findViewById<View>(R.id.action_circle_to_shop)?.setOnClickListener {
+            dismissCapturePopup()
+            launchCircleToShopConsent()
         }
 
         // Action 1: Add from screenshot
@@ -415,6 +464,7 @@ class VisualCartOverlayService : Service() {
         // Action 4: Hide floating button
         popup.findViewById<View>(R.id.action_hide_overlay)?.setOnClickListener {
             dismissCapturePopup()
+            OverlayCapturePreferences.setBubbleAutoStartEnabled(this, false)
             stopSelf()
         }
 
@@ -454,6 +504,19 @@ class VisualCartOverlayService : Service() {
             }
         }
         startActivity(intent)
+    }
+
+    private fun launchCircleToShopConsent() {
+        try {
+            val intent = CircleToShopConsentActivity.createLaunchIntent(this).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: ActivityNotFoundException) {
+            Log.e(TAG, "CircleToShopConsentActivity not found: ${e.message}", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch Circle to Shop consent: ${e.message}", e)
+        }
     }
 
     private fun clampPositionToScreen(params: WindowManager.LayoutParams) {
@@ -521,11 +584,15 @@ class VisualCartOverlayService : Service() {
         private const val KEY_POS_X = "pos_x"
         private const val KEY_POS_Y = "pos_y"
 
+        private val _isRunningFlow = MutableStateFlow(false)
+        val isRunningFlow: StateFlow<Boolean> = _isRunningFlow.asStateFlow()
+
         @Volatile
         var isRunning: Boolean = false
             private set
 
         fun start(context: Context) {
+            OverlayCapturePreferences.setBubbleAutoStartEnabled(context, true)
             val intent = Intent(context, VisualCartOverlayService::class.java).apply {
                 action = ACTION_START_OVERLAY
             }
@@ -537,6 +604,7 @@ class VisualCartOverlayService : Service() {
         }
 
         fun stop(context: Context) {
+            OverlayCapturePreferences.setBubbleAutoStartEnabled(context, false)
             val intent = Intent(context, VisualCartOverlayService::class.java).apply {
                 action = ACTION_STOP_OVERLAY
             }

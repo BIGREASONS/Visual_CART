@@ -1,0 +1,35 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Broken viewfinder circle arcs -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M4.01,9.09 A8.5,8.5 0 0,1 9.09,4.01"
+        android:strokeColor="#356B57"
+        android:strokeLineCap="round"
+        android:strokeWidth="2" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M14.91,4.01 A8.5,8.5 0 0,1 19.99,9.09"
+        android:strokeColor="#356B57"
+        android:strokeLineCap="round"
+        android:strokeWidth="2" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M19.99,14.91 A8.5,8.5 0 0,1 14.91,19.99"
+        android:strokeColor="#356B57"
+        android:strokeLineCap="round"
+        android:strokeWidth="2" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M9.09,19.99 A8.5,8.5 0 0,1 4.01,14.91"
+        android:strokeColor="#356B57"
+        android:strokeLineCap="round"
+        android:strokeWidth="2" />
+    <!-- Center editorial spark accent -->
+    <path
+        android:fillColor="#356B57"
+        android:pathData="M12,7.5 Q12.9,11.1 16.5,12 Q12.9,12.9 12,16.5 Q11.1,12.9 7.5,12 Q11.1,11.1 12,7.5 Z" />
+</vector>

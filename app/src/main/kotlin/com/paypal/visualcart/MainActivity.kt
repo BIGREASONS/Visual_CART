@@ -33,6 +33,8 @@ import com.paypal.visualcart.feature.merchant.ProductUrlExtractor
 import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
 import com.paypal.visualcart.feature.payment.PayPalCheckoutCoordinator
 import com.paypal.visualcart.feature.payment.PayPalDeepLinkHandler
+import com.paypal.visualcart.feature.circle.OverlayCapturePreferences
+import com.paypal.visualcart.service.capture.CircleToShopConsentActivity
 import com.paypal.visualcart.service.overlay.VisualCartOverlayService
 import com.paypal.visualcart.service.tile.VisualCartTileService
 import com.paypal.visualcart.ui.matching.DetectedProductMatchResult
@@ -51,13 +53,20 @@ class MainActivity : ComponentActivity() {
         MerchantDiscoveryEngine.defaultProviders().onEach { it.isLiveMode = false }
     )
     private val urlExtractor = ProductUrlExtractor()
+    private var pendingCircleToShopAfterOverlay = false
 
     private val overlayPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
+        val launchCircle = pendingCircleToShopAfterOverlay
+        pendingCircleToShopAfterOverlay = false
         if (Settings.canDrawOverlays(this)) {
             VisualCartOverlayService.start(this)
             VisualCartTileService.requestTileUpdate(this)
+            if (launchCircle) {
+                CaptureEventBus.emit(CaptureIntentEvent.StartCircleToShop)
+                startActivity(CircleToShopConsentActivity.createLaunchIntent(this))
+            }
         }
     }
 
@@ -91,6 +100,23 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val isDirectCircleLaunch =
+            intent?.action == ACTION_CAPTURE &&
+                intent?.getStringExtra(EXTRA_CAPTURE_TYPE) == CAPTURE_TYPE_CIRCLE_TO_SHOP
+        val shouldAutoStart = OverlayCapturePreferences.shouldAutoStartFloatingBubble(
+            hasOverlayPermission = Settings.canDrawOverlays(this),
+            userAutoStartEnabled = OverlayCapturePreferences.isBubbleAutoStartEnabled(this),
+            isAlreadyRunning = VisualCartOverlayService.isRunning,
+            isDirectCircleLaunch = isDirectCircleLaunch
+        )
+        if (shouldAutoStart) {
+            VisualCartOverlayService.start(this)
+            VisualCartTileService.requestTileUpdate(this)
         }
     }
 
@@ -208,10 +234,15 @@ class MainActivity : ComponentActivity() {
             ACTION_CAPTURE -> {
                 val captureType = intent.getStringExtra(EXTRA_CAPTURE_TYPE) ?: CAPTURE_TYPE_SCREENSHOT
                 CaptureEventBus.emit(CaptureIntentEvent.TriggerCapture(captureType))
-                if (captureType == CAPTURE_TYPE_SCREENSHOT) {
-                    photoPickerLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
+                when (captureType) {
+                    CAPTURE_TYPE_SCREENSHOT -> {
+                        photoPickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    }
+                    CAPTURE_TYPE_CIRCLE_TO_SHOP -> {
+                        launchCircleToShopFlow()
+                    }
                 }
             }
         }
@@ -420,6 +451,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    fun launchCircleToShopFlow() {
+        if (!Settings.canDrawOverlays(this)) {
+            pendingCircleToShopAfterOverlay = true
+            Toast.makeText(
+                this,
+                "Enable Display over other apps to use Circle to Shop",
+                Toast.LENGTH_SHORT
+            ).show()
+            promptOverlayPermission()
+            return
+        }
+        pendingCircleToShopAfterOverlay = false
+        CaptureEventBus.emit(CaptureIntentEvent.StartCircleToShop)
+        startActivity(CircleToShopConsentActivity.createLaunchIntent(this))
+    }
+
     fun promptOverlayPermission() {
         val intent = Intent(
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -438,5 +485,6 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_CAPTURE_TYPE = "extra_capture_type"
         const val CAPTURE_TYPE_SCREENSHOT = "screenshot"
         const val CAPTURE_TYPE_LINK = "link"
+        const val CAPTURE_TYPE_CIRCLE_TO_SHOP = "circle_to_shop"
     }
 }

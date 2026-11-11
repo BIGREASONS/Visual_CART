@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -99,6 +100,13 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
+        <!-- Circle to Shop Consent Activity -->
+        <activity
+            android:name=".service.capture.CircleToShopConsentActivity"
+            android:theme="@style/Theme.VisualCart.Dialog"
+            android:exported="false"
+            android:excludeFromRecents="true" />
+
         <!-- Quick Settings Tile Service -->
         <service
             android:name=".service.tile.VisualCartTileService"
@@ -120,6 +128,12 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Visual Cart floating overlay for capturing and saving products across applications" />
         </service>
+
+        <!-- Circle to Shop MediaProjection Capture Service -->
+        <service
+            android:name=".service.capture.CircleToShopCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
     </application>
 

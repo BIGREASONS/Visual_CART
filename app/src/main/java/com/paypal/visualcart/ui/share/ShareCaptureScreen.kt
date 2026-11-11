@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -31,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -63,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.paypal.visualcart.R
@@ -103,7 +106,8 @@ sealed interface ShareCaptureUiState {
     data class Loading(
         val thumbnail: Bitmap? = null,
         val statusMessage: String = "Finding your product…",
-        val detectedHint: String? = null
+        val detectedHint: String? = null,
+        val isCircleCapture: Boolean = false
     ) : ShareCaptureUiState
 
     data class Matched(
@@ -117,7 +121,8 @@ sealed interface ShareCaptureUiState {
             product.searchQuery.ifBlank { product.title },
             exactListings + similarListings
         ),
-        val isUncertain: Boolean = false
+        val isUncertain: Boolean = false,
+        val isCircleCapture: Boolean = false
     ) : ShareCaptureUiState
 
     data class Saved(
@@ -139,7 +144,8 @@ sealed interface ShareCaptureUiState {
         val canRetry: Boolean = false,
         val detectedCategory: String? = null,
         val rateLimited: Boolean = false,
-        val showSettingsAction: Boolean = false
+        val showSettingsAction: Boolean = false,
+        val isCircleCapture: Boolean = false
     ) : ShareCaptureUiState
 }
 
@@ -155,7 +161,8 @@ fun ShareCaptureDialog(
     onEditQuery: () -> Unit = {},
     onRetryRecognition: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onCircleAgain: (() -> Unit)? = null
 ) {
     // Dimmed background scrim
     Box(
@@ -195,7 +202,8 @@ fun ShareCaptureDialog(
                             onSubmitQuery = onSubmitManualQuery,
                             onRetryRecognition = onRetryRecognition,
                             onOpenSettings = onOpenSettings,
-                            onDismiss = onDismiss
+                            onDismiss = onDismiss,
+                            onCircleAgain = onCircleAgain
                         )
                     }
                     is ShareCaptureUiState.Matched -> {
@@ -276,6 +284,75 @@ private fun ShareDialogHeader(onDismiss: () -> Unit) {
 }
 
 @Composable
+private fun CircledSelectionBadge(modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(6.dp),
+        color = ForestGreenLight,
+        border = BorderStroke(0.8.dp, ForestGreen.copy(alpha = 0.35f))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Icon(
+                painter = painterResource(id = R.drawable.ic_circle_to_shop),
+                contentDescription = null,
+                tint = ForestGreen,
+                modifier = Modifier.size(12.dp)
+            )
+            Text(
+                text = "CIRCLED SELECTION",
+                style = VisualCartTypography.labelSmall.copy(
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = ForestGreen,
+                    letterSpacing = 0.8.sp
+                )
+            )
+        }
+    }
+}
+
+@Composable
+private fun CapturedThumbnailPreview(
+    bitmap: Bitmap?,
+    isCircleCapture: Boolean,
+    contentDescription: String,
+    size: Dp = 110.dp,
+    borderColor: Color = if (isCircleCapture) ForestGreen.copy(alpha = 0.45f) else Stone
+) {
+    val shape = RoundedCornerShape(16.dp)
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(shape)
+            .border(1.5.dp, borderColor, shape)
+            .background(if (bitmap != null) PureWhite else StoneLight),
+        contentAlignment = Alignment.Center
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = contentDescription,
+                contentScale = if (isCircleCapture) ContentScale.Fit else ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(if (isCircleCapture) Modifier.padding(4.dp) else Modifier)
+            )
+        } else if (isCircleCapture) {
+            Icon(
+                painter = painterResource(id = R.drawable.ic_circle_to_shop),
+                contentDescription = contentDescription,
+                tint = ForestGreen,
+                modifier = Modifier.size(30.dp)
+            )
+        }
+    }
+}
+
+@Composable
 private fun ShareLoadingContent(state: ShareCaptureUiState.Loading) {
     Column(
         modifier = Modifier
@@ -283,22 +360,18 @@ private fun ShareLoadingContent(state: ShareCaptureUiState.Loading) {
             .padding(vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        if (state.isCircleCapture) {
+            CircledSelectionBadge()
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
         if (state.thumbnail != null) {
-            Box(
-                modifier = Modifier
-                    .size(110.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .border(1.5.dp, Stone, RoundedCornerShape(16.dp))
-                    .background(PureWhite),
-                contentAlignment = Alignment.Center
-            ) {
-                Image(
-                    bitmap = state.thumbnail.asImageBitmap(),
-                    contentDescription = "Shared image",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
+            CapturedThumbnailPreview(
+                bitmap = state.thumbnail,
+                isCircleCapture = state.isCircleCapture,
+                contentDescription = if (state.isCircleCapture) "Circled product preview" else "Shared image",
+                size = if (state.isCircleCapture) 116.dp else 110.dp
+            )
             Spacer(modifier = Modifier.height(18.dp))
         }
 
@@ -321,7 +394,11 @@ private fun ShareLoadingContent(state: ShareCaptureUiState.Loading) {
         Spacer(modifier = Modifier.height(6.dp))
 
         Text(
-            text = "Analyzing visual features across Amazon, Flipkart, Croma, Reliance Digital & more…",
+            text = if (state.isCircleCapture) {
+                "Matching your circled product across Amazon, Flipkart, Croma, Reliance Digital & more…"
+            } else {
+                "Analyzing visual features across Amazon, Flipkart, Croma, Reliance Digital & more…"
+            },
             style = VisualCartTypography.bodySmall.copy(
                 color = MutedSlate,
                 lineHeight = 16.sp
@@ -357,6 +434,13 @@ private fun ShareMatchedContent(
     val isUncertainMatch = state.isUncertain ||
         state.product.status != RecognitionStatus.IDENTIFIED ||
         state.product.candidates.size > 1
+    val specChips = remember(state.product.specifications) {
+        state.product.specifications.values
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(3)
+    }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         // Product Hero Row
@@ -370,18 +454,38 @@ private fun ShareMatchedContent(
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (state.thumbnail != null) {
-                Image(
-                    bitmap = state.thumbnail.asImageBitmap(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
+                val heroShape = RoundedCornerShape(10.dp)
+                Box(
                     modifier = Modifier
                         .size(64.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                )
+                        .clip(heroShape)
+                        .background(if (state.isCircleCapture) PureWhite else Color.Transparent)
+                        .then(
+                            if (state.isCircleCapture) {
+                                Modifier.border(1.dp, ForestGreen.copy(alpha = 0.35f), heroShape)
+                            } else {
+                                Modifier
+                            }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        bitmap = state.thumbnail.asImageBitmap(),
+                        contentDescription = if (state.isCircleCapture) "Circled product preview" else null,
+                        contentScale = if (state.isCircleCapture) ContentScale.Fit else ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .then(if (state.isCircleCapture) Modifier.padding(2.dp) else Modifier)
+                    )
+                }
                 Spacer(modifier = Modifier.width(12.dp))
             }
 
             Column(modifier = Modifier.weight(1f)) {
+                if (state.isCircleCapture) {
+                    CircledSelectionBadge()
+                    Spacer(modifier = Modifier.height(5.dp))
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -409,8 +513,14 @@ private fun ShareMatchedContent(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     state.product.brand?.let { SpecTag(spec = it) }
                     SpecTag(spec = state.product.category)
                     ProductOriginBadge(
@@ -418,6 +528,15 @@ private fun ShareMatchedContent(
                         isLiveInference = state.product.isLiveInference,
                         recognitionSource = state.product.recognitionSource
                     )
+                    if (state.product.confidence > 0f) {
+                        ConfidenceIndicator(
+                            matchType = state.product.matchType,
+                            confidence = state.product.confidence
+                        )
+                    }
+                    specChips.forEach { spec ->
+                        SpecTag(spec = spec)
+                    }
                 }
             }
         }
@@ -884,25 +1003,34 @@ private fun ShareNeedsQueryContent(
     onSubmitQuery: (String) -> Unit,
     onRetryRecognition: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onCircleAgain: (() -> Unit)? = null
 ) {
     var query by remember(state.suggestedQuery) { mutableStateOf(state.suggestedQuery) }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
             .padding(vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (state.thumbnail != null) {
-            Image(
-                bitmap = state.thumbnail.asImageBitmap(),
-                contentDescription = "Captured product preview",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(104.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .border(1.5.dp, ForestGreen.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+        if (state.isCircleCapture) {
+            CircledSelectionBadge()
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        if (state.thumbnail != null || state.isCircleCapture) {
+            CapturedThumbnailPreview(
+                bitmap = state.thumbnail,
+                isCircleCapture = state.isCircleCapture,
+                contentDescription = if (state.isCircleCapture) "Circled product preview" else "Captured product preview",
+                size = when {
+                    state.thumbnail == null && state.isCircleCapture -> 76.dp
+                    state.isCircleCapture -> 112.dp
+                    else -> 104.dp
+                },
+                borderColor = ForestGreen.copy(alpha = 0.45f)
             )
             Spacer(modifier = Modifier.height(12.dp))
         }
@@ -922,6 +1050,43 @@ private fun ShareNeedsQueryContent(
                 lineHeight = 16.sp
             )
         )
+        if (state.isCircleCapture) {
+            Spacer(modifier = Modifier.height(8.dp))
+            if (onCircleAgain != null) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(ForestGreenLight)
+                        .border(1.dp, ForestGreen.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
+                        .clickable(onClick = onCircleAgain)
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.ic_circle_to_shop),
+                        contentDescription = null,
+                        tint = ForestGreen,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "Circle again or search manually",
+                        style = VisualCartTypography.labelSmall.copy(
+                            color = ForestGreen,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    )
+                }
+            } else {
+                Text(
+                    text = "Circle again or search manually",
+                    style = VisualCartTypography.labelSmall.copy(
+                        color = ForestGreen,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                )
+            }
+        }
         if (state.showSettingsAction && !state.rateLimited) {
             TextButton(
                 onClick = onOpenSettings,
