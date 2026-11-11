@@ -1,5 +1,7 @@
 package com.paypal.visualcart.feature.ai
 
+import android.content.Context
+import com.paypal.visualcart.core.config.VisualCartSettingsStore
 import com.paypal.visualcart.domain.model.MatchResult
 import com.paypal.visualcart.domain.model.RecognizedProduct
 import com.paypal.visualcart.domain.model.StructuredAiProduct
@@ -69,7 +71,10 @@ class CloudProductUnderstandingProvider(
     private val endpointUrl: String? = resolveEndpointUrl(),
     private val modelName: String = resolveModelName(),
     private val fallbackProvider: ProductUnderstandingProvider = DemoProductRecognitionProvider(),
-    private val networkTransport: NetworkTransport = DefaultHttpNetworkTransport(),
+    private val networkTransport: NetworkTransport = DefaultHttpNetworkTransport(
+        connectTimeoutMs = 5000,
+        readTimeoutMs = 30000
+    ),
     private val autoDetectBackendEndpoint: Boolean = false
 ) : ProductUnderstandingProvider {
 

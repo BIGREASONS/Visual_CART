@@ -42,10 +42,10 @@ import java.util.UUID
 
 class VisualCartShareActivity : ComponentActivity() {
 
-    private val recognitionProvider = GeminiFreeVisionProvider.forBackend()
-    private val liveMerchantEngine = MerchantDiscoveryEngine(
-        MerchantDiscoveryEngine.defaultProviders().onEach { it.isLiveMode = true }
-    )
+    private val recognitionProvider by lazy { GeminiFreeVisionProvider.forBackend(this) }
+    private val liveMerchantEngine by lazy {
+        MerchantDiscoveryEngine(MerchantDiscoveryEngine.liveProviders(this))
+    }
     private val demoMerchantEngine = MerchantDiscoveryEngine(
         MerchantDiscoveryEngine.defaultProviders().onEach { it.isLiveMode = false }
     )
@@ -109,6 +109,14 @@ class VisualCartShareActivity : ComponentActivity() {
                         if (retryUri != null) {
                             handleSharedImage(retryUri, lastShareContextText)
                         }
+                    },
+                    onOpenSettings = {
+                        val intent = Intent(this@VisualCartShareActivity, MainActivity::class.java).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            putExtra("open_settings", true)
+                        }
+                        startActivity(intent)
+                        finish()
                     },
                     onOpenFullCart = {
                         val intent = Intent(this@VisualCartShareActivity, MainActivity::class.java).apply {
@@ -272,7 +280,8 @@ class VisualCartShareActivity : ComponentActivity() {
                         candidates = recognized.candidates,
                         canRetry = true,
                         detectedCategory = recognized.category,
-                        rateLimited = recognized.rateLimited
+                        rateLimited = recognized.rateLimited,
+                        showSettingsAction = !recognized.rateLimited
                     )
                 }
                 return@launch
@@ -331,7 +340,8 @@ class VisualCartShareActivity : ComponentActivity() {
                         candidates = recognized.candidates,
                         canRetry = true,
                         detectedCategory = recognized.category,
-                        rateLimited = recognized.rateLimited
+                        rateLimited = recognized.rateLimited,
+                        showSettingsAction = !recognized.rateLimited
                     )
                 }
             }
@@ -417,14 +427,20 @@ class VisualCartShareActivity : ComponentActivity() {
         )
 
         lifecycleScope.launch(Dispatchers.IO) {
-            val queryTitle = if (extractedUrl != null) {
-                val parsed = urlExtractor.extract(extractedUrl)
-                parsed.title ?: "Shared Product"
-            } else {
-                sanitized
+            val lookupResp = if (extractedUrl != null) {
+                liveMerchantEngine.lookupSharedUrl(extractedUrl, this@VisualCartShareActivity)
+            } else null
+
+            val queryTitle = when {
+                !lookupResp?.title.isNullOrBlank() -> lookupResp!!.title!!
+                extractedUrl != null -> {
+                    val parsed = urlExtractor.extract(extractedUrl)
+                    parsed.title ?: "Shared Product"
+                }
+                else -> sanitized
             }
 
-            if (SearchQueryBuilder.isNonProductNoise(queryTitle)) {
+            if (SearchQueryBuilder.isNonProductNoise(queryTitle) && lookupResp?.listings.isNullOrEmpty()) {
                 withContext(Dispatchers.Main) {
                     uiState = ShareCaptureUiState.NeedsQuery(
                         thumbnail = null,
@@ -436,7 +452,10 @@ class VisualCartShareActivity : ComponentActivity() {
                 return@launch
             }
 
-            val recognized = recognitionProvider.recognizeFromText(queryTitle)
+            val recognized = recognitionProvider.recognizeFromText(queryTitle).let { rec ->
+                val lookupImg = lookupResp?.listings?.firstOrNull { it.imageUrl.isNotBlank() }?.imageUrl
+                if (lookupImg != null && rec.imageUrl.isNullOrBlank()) rec.copy(imageUrl = lookupImg) else rec
+            }
             val engine = if (recognized.recognitionSource == RecognitionSource.DEMO && recognized.isDemoFixture) {
                 demoMerchantEngine
             } else {
@@ -444,7 +463,10 @@ class VisualCartShareActivity : ComponentActivity() {
             }
             val discovery = engine.discoverStructured(recognized)
             val combined = engine.deduplicateListings(
-                discovery.exactMatches + discovery.similarAlternatives + discovery.searchLinks
+                (lookupResp?.listings ?: emptyList()) +
+                    discovery.exactMatches +
+                    discovery.similarAlternatives +
+                    discovery.searchLinks
             )
             val (bestListing, exactListings, similarListings, summary) = partitionListings(
                 recognized.searchQuery.ifBlank { recognized.title },
@@ -509,6 +531,7 @@ class VisualCartShareActivity : ComponentActivity() {
                     merchant = listing.merchantName,
                     title = current.product.title,
                     price = listing.price,
+                    originalPrice = listing.originalPrice,
                     currency = listing.currency,
                     productUrl = listing.productUrl,
                     imageUrl = listing.imageUrl,
@@ -517,6 +540,8 @@ class VisualCartShareActivity : ComponentActivity() {
                     availability = listing.availability.name,
                     sourceType = listing.sourceType.name,
                     listingOrigin = listing.listingOrigin.name,
+                    providerProductId = listing.providerProductId,
+                    offerSource = listing.offerSource,
                     lastVerifiedAt = System.currentTimeMillis(),
                     deliveryEstimate = listing.deliveryEstimate,
                     isSelectedForPurchase = listing.normalizedMerchantId == selectedListing.normalizedMerchantId

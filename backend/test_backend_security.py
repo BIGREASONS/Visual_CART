@@ -31,6 +31,7 @@ def isolate_offline_sandbox_tests(monkeypatch):
         "GEMINI_MODEL",
         "GEMINI_FREE_TIER_ONLY",
         "AI_MAX_COST_USD",
+        "CHANNEL3_API_KEY",
     ):
         monkeypatch.delenv(env_key, raising=False)
     monkeypatch.setattr("backend.main.paypal_client.client_id", "")
@@ -908,6 +909,119 @@ class TestVisualCartV12ImageAndMerchantPipeline:
         assert status["free_tier_only"] is True
         assert "/models/gemini-3.5-flash-lite" in seen_urls[0][0]
         assert seen_urls[0][1]["x-goog-api-key"] == "AQ.Ab8RN6TestKeyValidFormat123"
+
+
+class TestChannel3AndUniversalCartSecurity:
+    def test_channel3_client_defaults_empty_and_rejects_placeholders(self, monkeypatch):
+        from backend.channel3_client import Channel3Client, resolve_channel3_locale
+
+        monkeypatch.delenv("CHANNEL3_API_KEY", raising=False)
+        c3 = Channel3Client()
+        assert c3.api_key == ""
+        assert not c3.is_configured
+
+        placeholder = Channel3Client(api_key="your_channel3_key_here")
+        assert not placeholder.is_configured
+
+        loc_in = resolve_channel3_locale(country="IN", currency="INR")
+        assert loc_in["country"] == "US"
+        assert loc_in["currency"] == "USD"
+        assert loc_in["locale_fallback"] is True
+
+        loc_de = resolve_channel3_locale(country="DE", currency="EUR")
+        assert loc_de["country"] == "DE"
+        assert loc_de["currency"] == "EUR"
+        assert loc_de["locale_fallback"] is False
+
+    def test_jsonld_page_extractor_parses_structured_offer_and_blocks_ssrf(self):
+        from backend.page_extractor import (
+            UnsafeTargetUrlError,
+            parse_structured_product_html,
+            validate_public_http_url,
+        )
+
+        html = """
+        <html>
+          <head>
+            <script type="application/ld+json">
+              {
+                "@context": "https://schema.org",
+                "@type": "Product",
+                "name": "Sony WH-1000XM5 Headphones",
+                "brand": {"@type": "Brand", "name": "Sony"},
+                "image": "https://cdn.example.com/xm5.jpg",
+                "offers": {
+                  "@type": "Offer",
+                  "price": "348.00",
+                  "priceCurrency": "USD",
+                  "availability": "https://schema.org/InStock"
+                }
+              }
+            </script>
+          </head>
+        </html>
+        """
+        parsed = parse_structured_product_html(html, "https://www.example.com/product/xm5")
+        assert parsed is not None
+        assert parsed["price"] == 348.0
+        assert parsed["currency"] == "USD"
+        assert parsed["status"] == "IN_STOCK"
+        assert parsed["offer_source"] == "PRODUCT_PAGE_JSONLD"
+        assert parsed["listing_origin"] == "LIVE_API"
+
+        for bad in (
+            "http://127.0.0.1:8000/",
+            "http://10.0.0.5/secret",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://metadata.local/test",
+            "file:///etc/hosts",
+        ):
+            with pytest.raises(UnsafeTargetUrlError):
+                validate_public_http_url(bad)
+
+    def test_cart_order_inr_conversion_and_exact_item_total_sum(self):
+        from backend.cart_orders import CreateCartOrderRequest, build_cart_paypal_order_payload
+
+        req = CreateCartOrderRequest(
+            items=[
+                {
+                    "title": "Mouse Pad",
+                    "unit_price": 499.0,
+                    "quantity": 2,
+                    "currency": "INR",
+                    "merchant_name": "Amazon India",
+                },
+                {
+                    "title": "Logitech Mouse",
+                    "unit_price": 62.99,
+                    "quantity": 1,
+                    "currency": "USD",
+                    "merchant_name": "Newegg",
+                },
+            ],
+            convert_inr_to_usd=True,
+            tax_rate=0.08,
+            delivery_fee=5.0,
+        )
+        built = build_cart_paypal_order_payload(req)
+        assert built["currency"] == "USD"
+        pu = built["order_payload"]["purchase_units"][0]
+        items = pu["items"]
+        summed = sum(float(it["unit_amount"]["value"]) * int(it["quantity"]) for it in items)
+        declared_item_total = float(pu["amount"]["breakdown"]["item_total"]["value"])
+        assert abs(summed - declared_item_total) < 1e-6
+
+    def test_create_cart_order_endpoint_blocks_mock_header_in_live_mode(self, monkeypatch):
+        monkeypatch.setenv("PAYPAL_MODE", "live")
+        res = client.post(
+            "/api/v1/payments/paypal/create-cart-order",
+            json={
+                "items": [{"title": "Desk Pad", "unit_price": 23.99, "quantity": 1, "currency": "USD"}],
+                "mock_response": "DUPLICATE_INVOICE_ID",
+            },
+        )
+        assert res.status_code == 400
+
 
 
 

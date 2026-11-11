@@ -39,6 +39,7 @@ def isolate_offline_sandbox_tests(monkeypatch):
         "GEMINI_MODEL",
         "GEMINI_FREE_TIER_ONLY",
         "AI_MAX_COST_USD",
+        "CHANNEL3_API_KEY",
     ):
         monkeypatch.delenv(env_key, raising=False)
     monkeypatch.setattr("main.PAYPAL_CLIENT_ID", "")
@@ -905,6 +906,128 @@ def test_recognize_product_rejects_paid_model_override():
     )
     assert res.status_code == 400
     assert "allowlist" in res.json()["detail"].lower()
+
+
+def test_create_cart_order_multi_item_decimal_precision_and_currency_guard():
+    res = client.post(
+        "/api/v1/payments/paypal/create-cart-order",
+        json={
+            "items": [
+                {
+                    "title": "Logitech MX Master 3S",
+                    "unit_price": 62.99,
+                    "quantity": 1,
+                    "currency": "USD",
+                    "merchant_name": "Newegg",
+                    "offer_source": "CHANNEL3_API",
+                },
+                {
+                    "title": "World Map Desk Mat",
+                    "unit_price": 23.99,
+                    "quantity": 2,
+                    "currency": "USD",
+                    "merchant_name": "JCPenney",
+                    "offer_source": "CHANNEL3_API",
+                },
+            ],
+            "tax_rate": 0.08,
+            "delivery_fee": 0.0,
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["order_id"].startswith("SBX-CART-")
+    assert body["currency"] == "USD"
+    assert body["item_count"] == 3
+    assert body["merchant_count"] == 2
+    assert abs(body["order_summary"]["subtotal"] - 110.97) < 1e-6
+
+    # Reject mixed incompatible currencies without explicit conversion
+    bad_res = client.post(
+        "/api/v1/payments/paypal/create-cart-order",
+        json={
+            "items": [
+                {"title": "USD Item", "unit_price": 25.0, "quantity": 1, "currency": "USD"},
+                {"title": "EUR Item", "unit_price": 30.0, "quantity": 1, "currency": "EUR"},
+            ]
+        },
+    )
+    assert bad_res.status_code == 400
+
+
+def test_products_search_uses_mocked_channel3_and_preserves_direct_links(monkeypatch):
+    monkeypatch.setenv("CHANNEL3_API_KEY", "c3_test_key_valid_length")
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "products": [
+                    {
+                        "id": "prod_mx_3s",
+                        "title": "Logitech MX Master 3S Wireless Mouse",
+                        "brands": [{"id": "b1", "name": "Logitech"}],
+                        "category": {"slug": "mice", "title": "Computer Mice"},
+                        "images": [{"url": "https://cdn.example.com/mx3s.jpg", "is_main_image": True}],
+                        "offers": [
+                            {
+                                "domain": "newegg.com",
+                                "url": "https://www.newegg.com/p/mx3s",
+                                "price": {"price": 62.99, "compare_at_price": 99.99, "currency": "USD"},
+                                "availability": "InStock",
+                                "max_commission_rate": 0.04,
+                            },
+                            {
+                                "domain": "bestbuy.com",
+                                "url": "https://www.bestbuy.com/mx3s",
+                                "price": {"price": 99.99, "compare_at_price": None, "currency": "USD"},
+                                "availability": "InStock",
+                            },
+                        ],
+                    }
+                ]
+            }
+
+    async def _fake_post(self, url, headers=None, json=None):
+        assert headers["x-api-key"] == "c3_test_key_valid_length"
+        # Unsupported country IN falls back cleanly to US/USD to prevent Channel3 422
+        assert json["config"]["country"] == "US"
+        assert json["config"]["currency"] == "USD"
+        return _FakeResp()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+
+    res = client.post(
+        "/api/v1/products/search",
+        json={"query": "Logitech MX Master 3S", "country": "IN", "currency": "INR"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["channel3_used"] is True
+    assert body["offer_count"] == 2
+    assert body["lowest_price"] == 62.99
+    assert body["currency"] == "USD"
+    live_offers = body["offers"]
+    assert live_offers[0]["merchant"] == "Newegg"
+    assert live_offers[0]["price"] == 62.99
+    assert live_offers[0]["originalPrice"] == 99.99
+    assert live_offers[0]["isLowest"] is True
+    assert live_offers[0]["offer_source"] == "CHANNEL3_API"
+    assert live_offers[0]["listing_origin"] == "LIVE_API"
+
+
+def test_products_lookup_blocks_ssrf_targets():
+    for bad_url in (
+        "http://127.0.0.1:8000/health",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://localhost:8080/admin",
+        "file:///etc/passwd",
+        "https://user:pass@example.com/item",
+    ):
+        res = client.post("/api/v1/products/lookup", json={"url": bad_url})
+        assert res.status_code == 400
+
 
 
 

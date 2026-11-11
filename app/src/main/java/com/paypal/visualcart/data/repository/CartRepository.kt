@@ -27,6 +27,7 @@ interface CartRepository {
     suspend fun clearCart()
     suspend fun setSelectedListing(productId: String, listingId: String)
     suspend fun addAlternativeListing(productId: String, listing: MerchantListingEntity)
+    suspend fun replaceProductListings(productId: String, listings: List<MerchantListingEntity>)
     suspend fun getCollections(): List<CollectionEntity>
     fun getCollectionsFlow(): Flow<List<CollectionEntity>>
     suspend fun addCollection(name: String)
@@ -154,6 +155,10 @@ class CartRepositoryImpl(private val cartDao: CartDao) : CartRepository {
 
     override suspend fun addAlternativeListing(productId: String, listing: MerchantListingEntity) {
         cartDao.insertListing(listing.copy(savedProductId = productId))
+    }
+
+    override suspend fun replaceProductListings(productId: String, listings: List<MerchantListingEntity>) {
+        cartDao.replaceListingsForProduct(productId, listings)
     }
 
     override suspend fun getCollections(): List<CollectionEntity> {

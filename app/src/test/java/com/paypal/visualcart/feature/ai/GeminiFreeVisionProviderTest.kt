@@ -1,5 +1,6 @@
 package com.paypal.visualcart.feature.ai
 
+import com.paypal.visualcart.core.config.VisualCartSettingsStore
 import com.paypal.visualcart.domain.model.RecognitionSource
 import com.paypal.visualcart.domain.model.RecognitionStatus
 import kotlinx.coroutines.runBlocking
@@ -218,5 +219,75 @@ class GeminiFreeVisionProviderTest {
         assertEquals("Sleeveless sequined bodice", parsedDress.specifications["Style"])
         assertEquals("Cream", parsedDress.colour)
         assertEquals("cream sequined evening midi dress", parsedDress.searchQuery)
+    }
+
+    @Test
+    fun testBackendFailureFallsBackToDirectFreeTierKeyOnGemini35FlashLite() = runBlocking {
+        val requestedUrls = mutableListOf<String>()
+        val directJson = """
+            {
+              "candidates": [{
+                "content": {
+                  "parts": [{
+                    "text": "{\"brand\":\"PowerX\",\"product_name\":\"PowerX Wired Optical Mouse\",\"category\":\"Electronics\",\"model\":null,\"colour\":\"Black\",\"specifications\":[\"Connectivity: Wired USB\"],\"search_query\":\"PowerX wired optical mouse\",\"confidence\":0.89,\"identification_status\":\"IDENTIFIED\",\"match_reason\":\"PowerX logo visible on black wired mouse.\"}"
+                  }]
+                }
+              }]
+            }
+        """.trimIndent()
+
+        val provider = GeminiFreeVisionProvider(
+            apiKey = null,
+            endpointUrl = "http://127.0.0.1:59999/api/v1/ai/recognize-product",
+            dynamicApiKeySupplier = { "AQ.Ab8RN6TestFreeTierKey12345" },
+            networkTransport = NetworkTransport { url, _, _ ->
+                requestedUrls.add(url)
+                if (url.contains("127.0.0.1:59999")) {
+                    throw java.net.ConnectException("Connection refused")
+                }
+                NetworkResponse(statusCode = 200, body = directJson)
+            }
+        )
+
+        val result = provider.recognizeFromImage(VALID_1X1_PNG_DATA_URI, contextText = null)
+        assertEquals(2, requestedUrls.size)
+        assertTrue(requestedUrls[1].contains("/models/gemini-3.5-flash-lite:generateContent"))
+        assertEquals(RecognitionStatus.IDENTIFIED, result.status)
+        assertEquals("PowerX Wired Optical Mouse", result.title)
+        assertEquals("PowerX", result.brand)
+        assertTrue(result.isLiveInference)
+    }
+
+    @Test
+    fun testBackendUnreachableWithoutKeyReturnsActionableDiagnostic() = runBlocking {
+        val provider = GeminiFreeVisionProvider(
+            apiKey = null,
+            endpointUrl = "http://localhost:8000/api/v1/ai/recognize-product",
+            networkTransport = NetworkTransport { _, _, _ ->
+                throw java.net.ConnectException("ECONNREFUSED")
+            }
+        )
+
+        val result = provider.recognizeFromImage(VALID_1X1_PNG_DATA_URI, contextText = null)
+        assertEquals(RecognitionStatus.UNIDENTIFIED, result.status)
+        assertFalse(result.isDemoFixture)
+        val note = result.diagnosticNote.orEmpty()
+        assertTrue("Expected actionable message, got: $note", note.contains("Settings"))
+        assertTrue("Expected adb reverse or Backend URL hint, got: $note", note.contains("adb reverse"))
+    }
+
+    @Test
+    fun testSettingsStoreUrlNormalizationAndKeyMasking() {
+        assertEquals(
+            "http://192.168.1.8:8000",
+            VisualCartSettingsStore.normalizeBackendBaseUrl("192.168.1.8:8000/api/v1/ai/recognize-product")
+        )
+        assertEquals(
+            "https://demo.trycloudflare.com",
+            VisualCartSettingsStore.normalizeBackendBaseUrl("https://demo.trycloudflare.com/health/")
+        )
+        assertEquals(null, VisualCartSettingsStore.normalizeBackendBaseUrl("javascript:alert(1)"))
+        assertEquals(null, VisualCartSettingsStore.normalizeBackendBaseUrl("   "))
+        assertEquals("AIzaSy••••9999", VisualCartSettingsStore.maskApiKey("AIzaSyExampleKey123459999"))
     }
 }

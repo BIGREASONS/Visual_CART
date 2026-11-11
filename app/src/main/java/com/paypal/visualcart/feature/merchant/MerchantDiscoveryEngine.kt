@@ -149,6 +149,13 @@ class MerchantDiscoveryEngine(
         )
     }
 
+    suspend fun lookupSharedUrl(
+        url: String,
+        context: android.content.Context? = null
+    ): Channel3DiscoveryResponse = withContext(Dispatchers.IO) {
+        Channel3DiscoveryClient(context).lookupUrl(url)
+    }
+
     companion object {
         fun defaultProviders(): List<MerchantSearchProvider> = listOf(
             AmazonIndiaAdapter(),
@@ -158,5 +165,8 @@ class MerchantDiscoveryEngine(
             TataCliqAdapter(),
             MyntraAdapter()
         )
+
+        fun liveProviders(context: android.content.Context): List<MerchantSearchProvider> =
+            listOf(Channel3LiveProvider(context)) + defaultProviders().onEach { it.isLiveMode = true }
     }
 }

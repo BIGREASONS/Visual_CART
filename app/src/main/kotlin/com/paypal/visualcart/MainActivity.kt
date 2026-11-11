@@ -43,10 +43,10 @@ import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
-    private val aiProvider = GeminiFreeVisionProvider.forBackend()
-    private val liveMerchantDiscoveryEngine = MerchantDiscoveryEngine(
-        MerchantDiscoveryEngine.defaultProviders().onEach { it.isLiveMode = true }
-    )
+    private val aiProvider by lazy { GeminiFreeVisionProvider.forBackend(this) }
+    private val liveMerchantDiscoveryEngine by lazy {
+        MerchantDiscoveryEngine(MerchantDiscoveryEngine.liveProviders(this))
+    }
     private val demoMerchantDiscoveryEngine = MerchantDiscoveryEngine(
         MerchantDiscoveryEngine.defaultProviders().onEach { it.isLiveMode = false }
     )
@@ -105,6 +105,9 @@ class MainActivity : ComponentActivity() {
 
         if (intent.getBooleanExtra("open_cart", false)) {
             CaptureEventBus.emit(CaptureIntentEvent.OpenCart)
+        }
+        if (intent.getBooleanExtra("open_settings", false)) {
+            CaptureEventBus.emit(CaptureIntentEvent.OpenSettings)
         }
 
         val shouldRequestOverlay = intent.getBooleanExtra(EXTRA_REQUEST_OVERLAY_PERMISSION, false) ||
@@ -291,7 +294,10 @@ class MainActivity : ComponentActivity() {
                             listing.hasVerifiedPrice && listing.availability.name == "IN_STOCK" -> "In Stock"
                             listing.hasVerifiedPrice -> "Check Merchant"
                             else -> "Open search results"
-                        }
+                        },
+                        imageUrl = listing.imageUrl.takeIf { it.isNotBlank() },
+                        providerProductId = listing.providerProductId,
+                        offerSource = listing.offerSource
                     )
                 },
                 isDemoFixture = recognized.isDemoFixture,
@@ -316,15 +322,21 @@ class MainActivity : ComponentActivity() {
         val extractedUrl = SecurityUtils.extractWebUrl(text)
 
         lifecycleScope.launch(Dispatchers.IO) {
-            val queryTitle = if (extractedUrl != null) {
-                val parsed = urlExtractor.extract(extractedUrl)
-                parsed.title ?: "Shared Product"
-            } else {
-                sanitized
+            val lookupResp = if (extractedUrl != null) {
+                liveMerchantDiscoveryEngine.lookupSharedUrl(extractedUrl, this@MainActivity)
+            } else null
+
+            val queryTitle = when {
+                !lookupResp?.title.isNullOrBlank() -> lookupResp!!.title!!
+                extractedUrl != null -> {
+                    val parsed = urlExtractor.extract(extractedUrl)
+                    parsed.title ?: "Shared Product"
+                }
+                else -> sanitized
             }
 
             val cleanInput = SearchQueryBuilder.buildFromRawQuery(queryTitle)
-            if (cleanInput is SearchQueryBuilder.Result.Rejected) {
+            if (cleanInput is SearchQueryBuilder.Result.Rejected && lookupResp?.listings.isNullOrEmpty()) {
                 val rejectedResult = DetectedProductMatchResult(
                     detectedTitle = "Unidentified Shared Link",
                     brand = "Needs Query",
@@ -343,7 +355,7 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
 
-            val verifiedQuery = (cleanInput as SearchQueryBuilder.Result.Valid).query
+            val verifiedQuery = (cleanInput as? SearchQueryBuilder.Result.Valid)?.query ?: queryTitle
             val parsedAttrs = aiProvider.recognizeFromText(verifiedQuery)
             val engine = if (parsedAttrs.recognitionSource == RecognitionSource.DEMO && parsedAttrs.isDemoFixture) {
                 demoMerchantDiscoveryEngine
@@ -352,16 +364,25 @@ class MainActivity : ComponentActivity() {
             }
             val discovery = engine.discoverStructured(parsedAttrs)
             val listings = engine.deduplicateListings(
-                discovery.exactMatches + discovery.similarAlternatives + discovery.searchLinks
+                (lookupResp?.listings ?: emptyList()) +
+                    discovery.exactMatches +
+                    discovery.similarAlternatives +
+                    discovery.searchLinks
             )
             val summary = MerchantComparisonSummary.fromListings(verifiedQuery, listings)
+            val resolvedImg = lookupResp?.listings?.firstOrNull { !it.imageUrl.isNullOrBlank() }?.imageUrl
+                ?: listings.firstOrNull { it.imageUrl.isNotBlank() }?.imageUrl
 
             val matchResult = DetectedProductMatchResult(
                 detectedTitle = parsedAttrs.title,
                 brand = parsedAttrs.brand ?: "Product",
                 category = parsedAttrs.category,
                 specs = parsedAttrs.specifications.entries.map { "${it.key}: ${it.value}" },
-                matchReason = "Prepared ${listings.size} store matches for \"$verifiedQuery\".",
+                matchReason = if (listings.any { it.hasVerifiedPrice }) {
+                    "Found ${listings.count { it.hasVerifiedPrice }} live offer(s) across ${listings.size} stores for \"$verifiedQuery\"."
+                } else {
+                    "Prepared ${listings.size} store matches for \"$verifiedQuery\"."
+                },
                 listings = listings.map { listing: MerchantListing ->
                     MerchantListingItem(
                         merchantName = listing.merchantName,
@@ -376,11 +397,15 @@ class MainActivity : ComponentActivity() {
                         isLowestPrice = (summary?.hasComparableBestPrice == true) &&
                             listing.hasVerifiedPrice &&
                             listing.normalizedMerchantId == summary.lowestPriceListing?.normalizedMerchantId,
-                        stockNote = if (listing.hasVerifiedPrice) "In Stock" else "Open search results"
+                        stockNote = if (listing.hasVerifiedPrice) "In Stock" else "Open search results",
+                        imageUrl = listing.imageUrl.takeIf { it.isNotBlank() },
+                        providerProductId = listing.providerProductId,
+                        offerSource = listing.offerSource
                     )
                 },
                 isDemoFixture = parsedAttrs.isDemoFixture,
-                isLiveInference = parsedAttrs.isLiveInference,
+                isLiveInference = parsedAttrs.isLiveInference || listings.any { it.hasVerifiedPrice },
+                imageUri = resolvedImg,
                 isUncertain = parsedAttrs.status != RecognitionStatus.IDENTIFIED,
                 recognitionStatus = parsedAttrs.status,
                 candidates = parsedAttrs.candidates,

@@ -15,6 +15,7 @@ sealed class CaptureIntentEvent(
     data class TriggerCapture(val captureType: String) : CaptureIntentEvent()
     data class ShowProductMatch(val result: DetectedProductMatchResult) : CaptureIntentEvent()
     data object OpenCart : CaptureIntentEvent()
+    data object OpenSettings : CaptureIntentEvent()
     data class PayPalCheckoutApproved(val orderId: String, val payerId: String) : CaptureIntentEvent()
     data class PayPalCheckoutCancelled(val orderId: String?) : CaptureIntentEvent()
 }

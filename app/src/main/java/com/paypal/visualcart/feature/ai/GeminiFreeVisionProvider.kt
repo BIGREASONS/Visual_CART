@@ -1,7 +1,10 @@
 package com.paypal.visualcart.feature.ai
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
+import com.paypal.visualcart.core.config.VisualCartSettingsStore
 import com.paypal.visualcart.domain.model.MatchResult
 import com.paypal.visualcart.domain.model.MatchType
 import com.paypal.visualcart.domain.model.RecognitionSource
@@ -59,14 +62,24 @@ class GeminiFreeVisionProvider(
     private val fallbackProvider: ProductUnderstandingProvider? = null,
     private val networkTransport: NetworkTransport = DefaultHttpNetworkTransport(
         connectTimeoutMs = 5000,
-        readTimeoutMs = 15000
+        readTimeoutMs = 30000
     ),
     private val getTransport: ((String, Map<String, String>) -> NetworkResponse)? = null,
-    private val autoDetectBackendEndpoint: Boolean = false
+    private val autoDetectBackendEndpoint: Boolean = false,
+    private val backendCandidatesSupplier: () -> List<String> = { BACKEND_CANDIDATE_URLS },
+    private val dynamicApiKeySupplier: () -> String? = { apiKey },
+    private val aiModeSupplier: () -> String = { VisualCartSettingsStore.MODE_CLOUD_GEMINI },
+    private val demoEnabledSupplier: () -> Boolean = { true }
 ) : ProductUnderstandingProvider {
 
     @Volatile
     private var cachedBackendEndpointUrl: String? = null
+
+    @Volatile
+    private var lastCandidatesKey: String? = null
+
+    @Volatile
+    private var lastInferenceDiagnostic: String? = null
 
     @Volatile
     private var rateLimitUntilMs: Long = 0L
@@ -118,6 +131,17 @@ class GeminiFreeVisionProvider(
 
         fun forBackend(): GeminiFreeVisionProvider =
             GeminiFreeVisionProvider(autoDetectBackendEndpoint = true)
+
+        fun forBackend(context: Context): GeminiFreeVisionProvider {
+            val appCtx = context.applicationContext
+            return GeminiFreeVisionProvider(
+                autoDetectBackendEndpoint = true,
+                backendCandidatesSupplier = { VisualCartSettingsStore.resolveCandidateBackendUrls(appCtx) },
+                dynamicApiKeySupplier = { VisualCartSettingsStore.getDirectGeminiApiKey(appCtx) ?: resolveApiKey() },
+                aiModeSupplier = { VisualCartSettingsStore.getAiProviderMode(appCtx) },
+                demoEnabledSupplier = { VisualCartSettingsStore.isDemoDataEnabled(appCtx) }
+            )
+        }
 
         fun validateFreeTierPolicy(
             modelName: String,
@@ -842,8 +866,24 @@ class GeminiFreeVisionProvider(
 
     override fun getProviderName(): String = PROVIDER_NAME
 
+    private fun effectiveApiKey(): String? =
+        dynamicApiKeySupplier()?.trim()?.takeIf { it.isNotBlank() }
+            ?: apiKey?.trim()?.takeIf { it.isNotBlank() }
+
+    private fun safeLog(level: Int, msg: String) {
+        try {
+            when (level) {
+                Log.ERROR -> Log.e("VisualCartAI", msg)
+                Log.WARN -> Log.w("VisualCartAI", msg)
+                else -> Log.i("VisualCartAI", msg)
+            }
+        } catch (_: Throwable) {
+            // Ignored in JVM unit tests without Android Log mock
+        }
+    }
+
     fun isCloudConfigured(): Boolean {
-        return isValidApiKeyFormat(apiKey) || !endpointUrl.isNullOrBlank() || autoDetectBackendEndpoint
+        return isValidApiKeyFormat(effectiveApiKey()) || !endpointUrl.isNullOrBlank() || autoDetectBackendEndpoint
     }
 
     fun isRateLimitedNow(): Boolean = rateLimitUntilMs > System.currentTimeMillis()
@@ -852,30 +892,40 @@ class GeminiFreeVisionProvider(
         rateLimitUntilMs = 0L
     }
 
-    internal fun resolveActiveEndpointUrl(): String? {
+    internal fun resolveActiveEndpointUrl(forceReprobe: Boolean = false): String? {
         if (!endpointUrl.isNullOrBlank()) return endpointUrl
         if (!autoDetectBackendEndpoint) return null
-        cachedBackendEndpointUrl?.let { return it }
+        val candidates = backendCandidatesSupplier()
+        val candidatesKey = candidates.joinToString("|")
+        if (!forceReprobe && cachedBackendEndpointUrl != null && lastCandidatesKey == candidatesKey) {
+            return cachedBackendEndpointUrl
+        }
+        cachedBackendEndpointUrl = null
 
-        for (baseUrl in BACKEND_CANDIDATE_URLS) {
+        for (rawBase in candidates) {
+            val baseUrl = rawBase.trim().trimEnd('/')
+            if (baseUrl.isBlank()) continue
             try {
                 val url = URL("$baseUrl/health")
                 val conn = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
-                    connectTimeout = 900
-                    readTimeout = 900
+                    connectTimeout = 1200
+                    readTimeout = 1500
                 }
                 val code = conn.responseCode
                 conn.disconnect()
                 if (code in 200..299) {
                     val resolved = "$baseUrl$BACKEND_PROXY_PATH"
                     cachedBackendEndpointUrl = resolved
+                    lastCandidatesKey = candidatesKey
+                    safeLog(Log.INFO, "Connected AI backend endpoint: $baseUrl")
                     return resolved
                 }
             } catch (_: Throwable) {
                 // Probe next backend candidate
             }
         }
+        safeLog(Log.WARN, "No AI backend reachable across candidates: ${candidates.joinToString(", ")}")
         return null
     }
 
@@ -884,24 +934,38 @@ class GeminiFreeVisionProvider(
      */
     fun verifyModelAvailability(): ModelAvailabilityResult {
         validateFreeTierPolicy(modelName, freeTierOnly, maxCostUsd)
-        val proxy = resolveActiveEndpointUrl()
+        val proxy = resolveActiveEndpointUrl(forceReprobe = true)
         if (!proxy.isNullOrBlank()) {
             val statusUrl = proxy.removeSuffix(BACKEND_PROXY_PATH).trimEnd('/') + BACKEND_STATUS_PATH
             val resp = executeGet(statusUrl, mapOf("Accept" to "application/json"))
             val available = resp?.isSuccessful == true && (resp.body?.contains("\"available\":true") == true || resp.body?.contains("\"available\": true") == true)
-            return ModelAvailabilityResult(
-                available = available,
-                modelName = modelName,
-                statusCode = resp?.statusCode,
-                reason = if (available) "Backend free-tier model reachable" else "Backend model unavailable (${resp?.statusCode})"
-            )
+            if (available) {
+                val hostLabel = proxy.removeSuffix(BACKEND_PROXY_PATH)
+                return ModelAvailabilityResult(
+                    available = true,
+                    modelName = modelName,
+                    statusCode = resp?.statusCode,
+                    reason = "Backend reachable ($hostLabel) · $modelName ready"
+                )
+            }
+            val directKeyOnFailure = effectiveApiKey()
+            if (!isValidApiKeyFormat(directKeyOnFailure)) {
+                return ModelAvailabilityResult(
+                    available = false,
+                    modelName = modelName,
+                    statusCode = resp?.statusCode,
+                    reason = "Backend model unavailable (${resp?.statusCode ?: "unreachable"})"
+                )
+            }
         }
 
-        if (!isValidApiKeyFormat(apiKey)) {
+        val activeKey = effectiveApiKey()
+        if (!isValidApiKeyFormat(activeKey)) {
+            val tried = backendCandidatesSupplier().joinToString(", ")
             return ModelAvailabilityResult(
                 available = false,
                 modelName = modelName,
-                reason = "Missing or invalid GEMINI_API_KEY format"
+                reason = "Backend unreachable ($tried) and no direct Google AI Studio key saved"
             )
         }
 
@@ -909,7 +973,7 @@ class GeminiFreeVisionProvider(
         val resp = executeGet(
             url,
             mapOf(
-                "x-goog-api-key" to apiKey!!.trim(),
+                "x-goog-api-key" to activeKey!!.trim(),
                 "Accept" to "application/json"
             )
         )
@@ -917,14 +981,27 @@ class GeminiFreeVisionProvider(
             available = resp?.isSuccessful == true,
             modelName = modelName,
             statusCode = resp?.statusCode,
-            reason = if (resp?.isSuccessful == true) "Approved free-tier model verified" else "Model check HTTP ${resp?.statusCode}"
+            reason = if (resp?.isSuccessful == true) {
+                "Direct Google AI Studio $modelName verified (free tier)"
+            } else {
+                "Direct model check HTTP ${resp?.statusCode ?: "network error"}"
+            }
         )
     }
 
     override suspend fun recognizeFromText(text: String): RecognizedProduct {
         validateFreeTierPolicy(modelName, freeTierOnly, maxCostUsd)
+        lastInferenceDiagnostic = null
         if (SearchQueryBuilder.isNonProductNoise(text)) {
             return localFallback(text, imageUri = null, reason = "Rejected non-product text noise.")
+        }
+        when (aiModeSupplier()) {
+            VisualCartSettingsStore.MODE_ON_DEVICE ->
+                return localFallback(text, imageUri = null)
+            VisualCartSettingsStore.MODE_DEMO_FIXTURES ->
+                if (demoEnabledSupplier()) {
+                    return DemoProductRecognitionProvider().recognizeFromText(text)
+                }
         }
         if (isRateLimitedNow()) {
             return localFallback(text, imageUri = null, rateLimited = true, reason = RATE_LIMIT_MESSAGE)
@@ -942,6 +1019,7 @@ class GeminiFreeVisionProvider(
 
     override suspend fun recognizeFromImage(imageUri: String, contextText: String?): RecognizedProduct {
         validateFreeTierPolicy(modelName, freeTierOnly, maxCostUsd)
+        lastInferenceDiagnostic = null
         val cleanContext = contextText?.takeIf { !SearchQueryBuilder.isNonProductNoise(it) }
 
         val imagePayload = resolveImagePayload(imageUri)
@@ -951,6 +1029,19 @@ class GeminiFreeVisionProvider(
                 reason = imagePayload.corruptError,
                 diagnosticNote = "Corrupt image rejected before calling free-tier AI."
             )
+        }
+
+        when (aiModeSupplier()) {
+            VisualCartSettingsStore.MODE_ON_DEVICE ->
+                return localFallback(
+                    cleanContext,
+                    imageUri = imageUri,
+                    reason = "Local On-Device OCR mode is selected in Settings. Enter product text manually or switch to Gemini 3.5 Flash-Lite."
+                )
+            VisualCartSettingsStore.MODE_DEMO_FIXTURES ->
+                if (demoEnabledSupplier()) {
+                    return DemoProductRecognitionProvider().recognizeFromImage(imageUri, cleanContext)
+                }
         }
 
         val cacheKey = buildCacheKey(imagePayload, cleanContext)
@@ -983,7 +1074,8 @@ class GeminiFreeVisionProvider(
                 }
             }
             result
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            safeLog(Log.WARN, "AI recognition exception: ${e.javaClass.simpleName}")
             localFallback(cleanContext, imageUri = imageUri)
         }
     }
@@ -1026,8 +1118,8 @@ class GeminiFreeVisionProvider(
             return null
         }
 
-        val proxy = resolveActiveEndpointUrl()
-        val response: NetworkResponse?
+        var proxy = resolveActiveEndpointUrl(forceReprobe = false)
+        var response: NetworkResponse? = null
         if (!proxy.isNullOrBlank()) {
             val requestBody = buildBackendProxyPayload(
                 text = cleanContext,
@@ -1036,17 +1128,45 @@ class GeminiFreeVisionProvider(
                 modelName = modelName
             )
             response = postEndpoint(proxy, emptyMap(), requestBody)
-        } else if (isValidApiKeyFormat(apiKey)) {
+            if (response == null && autoDetectBackendEndpoint && endpointUrl.isNullOrBlank()) {
+                val failedProxy = proxy
+                cachedBackendEndpointUrl = null
+                val reprobed = resolveActiveEndpointUrl(forceReprobe = true)
+                if (!reprobed.isNullOrBlank() && reprobed != failedProxy) {
+                    proxy = reprobed
+                    response = postEndpoint(reprobed, emptyMap(), requestBody)
+                }
+            }
+        }
+
+        if (response?.statusCode == 429) {
+            rateLimitUntilMs = System.currentTimeMillis() + RATE_LIMIT_COOLDOWN_MS
+            return localFallback(cleanContext, imageUri = imageUri, rateLimited = true, reason = RATE_LIMIT_MESSAGE)
+        }
+
+        val activeKey = effectiveApiKey()
+        val backendFailed = proxy.isNullOrBlank() || response == null || response.statusCode >= 500
+        if (backendFailed && isValidApiKeyFormat(activeKey)) {
             val prompt = buildDirectPrompt(cleanContext)
             val requestBody = buildDirectGeminiPayload(prompt, imagePayload = imagePayload)
             // Single approved free-tier request ONLY — key passed securely in x-goog-api-key header, never URL param
             val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent"
-            response = postEndpoint(url, mapOf("x-goog-api-key" to apiKey!!.trim()), requestBody)
-        } else {
-            return null
+            response = postEndpoint(url, mapOf("x-goog-api-key" to activeKey!!.trim()), requestBody)
         }
 
-        if (response == null) return null
+        if (response == null) {
+            val tried = if (!endpointUrl.isNullOrBlank()) {
+                endpointUrl
+            } else {
+                backendCandidatesSupplier().joinToString(", ")
+            }
+            lastInferenceDiagnostic = if (isValidApiKeyFormat(activeKey)) {
+                "Free-tier AI request timed out or failed offline ($tried and Google AI Studio unreachable)."
+            } else {
+                "Free-tier AI backend unreachable ($tried). Reconnect USB adb reverse, set a Backend URL, or add a free Google AI Studio key in Settings."
+            }
+            return null
+        }
 
         // Strict zero-billing 429 handling: open circuit breaker immediately, never retry or upgrade model
         if (response.statusCode == 429) {
@@ -1055,6 +1175,7 @@ class GeminiFreeVisionProvider(
         }
 
         if (!response.isSuccessful || response.body.isNullOrBlank()) {
+            lastInferenceDiagnostic = "Free-tier AI returned HTTP ${response.statusCode}. Verify backend health or Google AI Studio key in Settings."
             return null
         }
 
@@ -1126,14 +1247,15 @@ class GeminiFreeVisionProvider(
         rateLimited: Boolean = false,
         reason: String? = null
     ): RecognizedProduct {
+        val effectiveReason = reason ?: lastInferenceDiagnostic
         if (fallbackProvider != null && !cleanHint.isNullOrBlank()) {
             val delegated = fallbackProvider.recognizeFromText(cleanHint)
             return if (rateLimited) {
                 delegated.copy(
                     rateLimited = true,
                     isLiveInference = false,
-                    diagnosticNote = reason ?: RATE_LIMIT_MESSAGE,
-                    matchReason = reason ?: RATE_LIMIT_MESSAGE
+                    diagnosticNote = effectiveReason ?: RATE_LIMIT_MESSAGE,
+                    matchReason = effectiveReason ?: RATE_LIMIT_MESSAGE
                 )
             } else {
                 delegated
@@ -1144,7 +1266,7 @@ class GeminiFreeVisionProvider(
             val parsed = LocalProductParser.parse(cleanHint, imageUrl = imageUri)
             return parsed.copy(
                 rateLimited = rateLimited,
-                diagnosticNote = reason ?: parsed.diagnosticNote,
+                diagnosticNote = effectiveReason ?: parsed.diagnosticNote,
                 matchReason = if (rateLimited) RATE_LIMIT_MESSAGE else parsed.matchReason
             )
         }
@@ -1152,8 +1274,8 @@ class GeminiFreeVisionProvider(
         return unidentifiedResult(
             imageUri = imageUri,
             rateLimited = rateLimited,
-            reason = reason ?: "Could not identify product offline. Enter product name manually or use store search links.",
-            diagnosticNote = reason ?: "Local heuristic fallback requires product text or configured free-tier AI."
+            reason = effectiveReason ?: "Free-tier AI could not connect. Reconnect USB adb reverse, set a Backend URL, or add a free Google AI Studio key in Settings.",
+            diagnosticNote = effectiveReason ?: "Free-tier AI could not connect. Reconnect USB adb reverse, set a Backend URL, or add a free Google AI Studio key in Settings."
         )
     }
 

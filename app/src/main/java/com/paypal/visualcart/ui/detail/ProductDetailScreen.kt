@@ -35,11 +35,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -84,6 +86,7 @@ import com.paypal.visualcart.domain.model.MerchantListing
 import com.paypal.visualcart.domain.model.SourceType
 import com.paypal.visualcart.feature.payment.PayPalCheckoutCoordinator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -97,6 +100,8 @@ fun ProductDetailScreen(
         CartRepositoryImpl(VisualCartDatabase.getInstance(context))
     }
     var savedProduct by remember(productId) { mutableStateOf<SavedProductWithListings?>(null) }
+    var isRefreshingLiveOffers by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(productId) {
         savedProduct = withContext(Dispatchers.IO) {
@@ -222,7 +227,7 @@ fun ProductDetailScreen(
                 MerchantDetailListing(
                     name = entity.merchant,
                     price = validPrice,
-                    originalPrice = null,
+                    originalPrice = entity.originalPrice?.takeIf { validPrice != null && it > validPrice },
                     currency = entity.currency,
                     hasVerifiedPrice = entity.hasVerifiedPrice,
                     listingOrigin = entity.listingOrigin,
@@ -231,7 +236,9 @@ fun ProductDetailScreen(
                     matchType = runCatching { MatchType.valueOf(entity.matchType) }.getOrDefault(MatchType.EXACT),
                     confidence = entity.confidence,
                     isLowest = comparableMinPrice != null && validPrice != null && validPrice == comparableMinPrice,
-                    url = entity.productUrl
+                    url = entity.productUrl,
+                    providerProductId = entity.providerProductId,
+                    offerSource = entity.offerSource
                 )
             }
         } else if (productId == "crucial-p3-plus-1tb") {
@@ -356,7 +363,7 @@ fun ProductDetailScreen(
                     IconButton(
                         onClick = {
                             val shareText = if (bestDeal?.hasVerifiedPrice == true && bestDeal.price != null) {
-                                "Comparing $productTitle on Visual Cart - ₹${bestDeal.price.toInt()} on ${bestDeal.name}!"
+                                "Comparing $productTitle on Visual Cart - ${com.paypal.visualcart.core.util.CurrencyFormatter.format(bestDeal.price, bestDeal.currency)} on ${bestDeal.name}!"
                             } else {
                                 "Tracking $productTitle on Visual Cart."
                             }
@@ -488,7 +495,7 @@ fun ProductDetailScreen(
                                 Row(verticalAlignment = Alignment.Bottom) {
                                     if (bestPrice != null) {
                                         Text(
-                                            text = "₹${bestPrice.toInt()}",
+                                            text = com.paypal.visualcart.core.util.CurrencyFormatter.format(bestPrice, activeBest?.currency),
                                             style = VisualCartTypography.displayMedium.copy(
                                                 fontWeight = FontWeight.Bold,
                                                 color = DeepInk
@@ -497,7 +504,7 @@ fun ProductDetailScreen(
                                         if (bestOriginal != null && bestOriginal > bestPrice) {
                                             Spacer(modifier = Modifier.width(8.dp))
                                             Text(
-                                                text = "₹${bestOriginal.toInt()}",
+                                                text = com.paypal.visualcart.core.util.CurrencyFormatter.format(bestOriginal, activeBest?.currency),
                                                 style = VisualCartTypography.bodyMedium.copy(
                                                     textDecoration = TextDecoration.LineThrough,
                                                     color = MutedSlate
@@ -524,7 +531,7 @@ fun ProductDetailScreen(
                                     border = androidx.compose.foundation.BorderStroke(1.dp, Terracotta.copy(alpha = 0.3f))
                                 ) {
                                     Text(
-                                        text = "Save ₹${bannerSavings.toInt()} ($pct%)",
+                                        text = "Save ${com.paypal.visualcart.core.util.CurrencyFormatter.format(bannerSavings, activeBest?.currency)} ($pct%)",
                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                                         style = VisualCartTypography.labelMedium.copy(
                                             fontWeight = FontWeight.Bold,
@@ -540,7 +547,7 @@ fun ProductDetailScreen(
                         // PayPal 1-Click Sandbox Checkout (gated strictly on verified price)
                         if (activeBest != null && bestPrice != null) {
                             VisualCartButton(
-                                text = "Checkout with PayPal · ₹${bestPrice.toInt()}",
+                                text = "Checkout with PayPal · ${com.paypal.visualcart.core.util.CurrencyFormatter.format(bestPrice, activeBest.currency)}",
                                 onClick = {
                                     val originEnum = runCatching {
                                         com.paypal.visualcart.domain.model.ListingOrigin.valueOf(activeBest.listingOrigin)
@@ -560,7 +567,9 @@ fun ProductDetailScreen(
                                         availability = AvailabilityStatus.IN_STOCK,
                                         sourceType = if (isDemoProduct) SourceType.DEMO else SourceType.LIVE,
                                         listingOrigin = originEnum,
-                                        lastVerifiedAt = System.currentTimeMillis()
+                                        lastVerifiedAt = System.currentTimeMillis(),
+                                        providerProductId = activeBest.providerProductId,
+                                        offerSource = activeBest.offerSource
                                     )
                                     PayPalCheckoutCoordinator.instance.startCheckout(context, listing)
                                 },
@@ -612,13 +621,101 @@ fun ProductDetailScreen(
 
             // Merchant Comparison List
             Column(modifier = Modifier.padding(horizontal = 20.dp)) {
-                Text(
-                    text = "Compare Stores & Availability",
-                    style = VisualCartTypography.titleLarge.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = DeepInk
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Compare Stores & Availability",
+                        style = VisualCartTypography.titleLarge.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = DeepInk
+                        ),
+                        modifier = Modifier.weight(1f)
                     )
-                )
+                    if (savedProduct != null) {
+                        TextButton(
+                            enabled = !isRefreshingLiveOffers,
+                            onClick = {
+                                val currentSaved = savedProduct ?: return@TextButton
+                                isRefreshingLiveOffers = true
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    val c3Client = com.paypal.visualcart.feature.merchant.Channel3DiscoveryClient(context)
+                                    val providerId = currentSaved.listings.firstOrNull { !it.providerProductId.isNullOrBlank() }?.providerProductId
+                                    val resp = if (!providerId.isNullOrBlank()) {
+                                        c3Client.refreshProduct(providerId)
+                                    } else {
+                                        c3Client.searchProducts(currentSaved.product.title)
+                                    }
+                                    if (resp.ok && resp.listings.isNotEmpty()) {
+                                        val selectedMerchantKey = currentSaved.selectedListing?.let {
+                                            com.paypal.visualcart.feature.merchant.SearchQueryBuilder.normalizeMerchantKey(it.merchant)
+                                        }
+                                        val liveEntities = resp.listings.mapIndexed { idx, l ->
+                                            val sameMerchant = selectedMerchantKey != null &&
+                                                com.paypal.visualcart.feature.merchant.SearchQueryBuilder.normalizeMerchantKey(l.merchantName) == selectedMerchantKey
+                                            com.paypal.visualcart.data.local.entity.MerchantListingEntity(
+                                                savedProductId = currentSaved.product.id,
+                                                merchant = l.merchantName,
+                                                title = l.title,
+                                                price = l.price,
+                                                originalPrice = l.originalPrice,
+                                                currency = l.currency,
+                                                productUrl = l.productUrl,
+                                                imageUrl = l.imageUrl.takeIf { it.isNotBlank() },
+                                                matchType = l.matchType.name,
+                                                confidence = l.confidence,
+                                                availability = l.availability.name,
+                                                sourceType = l.sourceType.name,
+                                                listingOrigin = l.listingOrigin.name,
+                                                providerProductId = l.providerProductId,
+                                                offerSource = l.offerSource,
+                                                lastVerifiedAt = System.currentTimeMillis(),
+                                                deliveryEstimate = l.deliveryEstimate,
+                                                isSelectedForPurchase = sameMerchant || (selectedMerchantKey == null && idx == 0)
+                                            )
+                                        }
+                                        val existingSearchLinks = currentSaved.listings.filter {
+                                            it.listingOrigin == "DIRECT_SEARCH_URL"
+                                        }.map { it.copy(isSelectedForPurchase = false) }
+                                        cartRepository.replaceProductListings(
+                                            currentSaved.product.id,
+                                            liveEntities + existingSearchLinks
+                                        )
+                                        val updated = cartRepository.getProductById(currentSaved.product.id)
+                                        withContext(Dispatchers.Main) {
+                                            savedProduct = updated
+                                            isRefreshingLiveOffers = false
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                "Refreshed ${liveEntities.size} live offer(s)",
+                                                android.widget.Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    } else {
+                                        withContext(Dispatchers.Main) {
+                                            isRefreshingLiveOffers = false
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                resp.error ?: "No new live offers found right now",
+                                                android.widget.Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                }
+                            }
+                        ) {
+                            Text(
+                                text = if (isRefreshingLiveOffers) "Refreshing…" else "Refresh Live Offers",
+                                style = VisualCartTypography.labelMedium.copy(
+                                    color = ForestGreen,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            )
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -664,7 +761,7 @@ fun ProductDetailScreen(
                                         val rowPrice = listing.price
                                         if (listing.hasVerifiedPrice && rowPrice != null) {
                                             Text(
-                                                text = "₹${rowPrice.toInt()}",
+                                                text = com.paypal.visualcart.core.util.CurrencyFormatter.format(rowPrice, listing.currency),
                                                 style = VisualCartTypography.titleLarge.copy(
                                                     fontWeight = FontWeight.Bold,
                                                     color = DeepInk
@@ -673,7 +770,7 @@ fun ProductDetailScreen(
                                             if (listing.originalPrice != null && listing.originalPrice > rowPrice) {
                                                 Spacer(modifier = Modifier.width(6.dp))
                                                 Text(
-                                                    text = "₹${listing.originalPrice.toInt()}",
+                                                    text = com.paypal.visualcart.core.util.CurrencyFormatter.format(listing.originalPrice, listing.currency),
                                                     style = VisualCartTypography.bodySmall.copy(
                                                         textDecoration = TextDecoration.LineThrough,
                                                         color = MutedSlate
@@ -771,8 +868,9 @@ fun ProductDetailScreen(
                                             fontWeight = FontWeight.Bold
                                         )
                                     )
+                                    val obsCurr = realObservations.firstOrNull()?.currency ?: bestDeal?.currency ?: "USD"
                                     Text(
-                                        text = "₹${lowObs.toInt()}",
+                                        text = com.paypal.visualcart.core.util.CurrencyFormatter.format(lowObs, obsCurr),
                                         style = VisualCartTypography.titleMedium.copy(
                                             fontWeight = FontWeight.Bold,
                                             color = DeepInk
@@ -788,8 +886,9 @@ fun ProductDetailScreen(
                                             letterSpacing = 0.8.sp
                                         )
                                     )
+                                    val obsCurrHigh = realObservations.firstOrNull()?.currency ?: bestDeal?.currency ?: "USD"
                                     Text(
-                                        text = "₹${highObs.toInt()}",
+                                        text = com.paypal.visualcart.core.util.CurrencyFormatter.format(highObs, obsCurrHigh),
                                         style = VisualCartTypography.titleMedium.copy(
                                             fontWeight = FontWeight.Medium,
                                             color = MutedSlate
@@ -871,7 +970,8 @@ fun ProductDetailScreen(
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = if (realObservations.size == 1) {
-                                    "1 price observation recorded (₹${realObservations.first().price.toInt()}). Revisit stores to build a trend."
+                                    val firstObs = realObservations.first()
+                                    "1 price observation recorded (${com.paypal.visualcart.core.util.CurrencyFormatter.format(firstObs.price, firstObs.currency)}). Revisit stores to build a trend."
                                 } else {
                                     "Price trend will appear once at least 2 verified price observations are recorded for this item."
                                 },
@@ -1133,7 +1233,9 @@ private data class MerchantDetailListing(
     val matchType: MatchType,
     val confidence: Float,
     val isLowest: Boolean,
-    val url: String
+    val url: String,
+    val providerProductId: String? = null,
+    val offerSource: String? = null
 )
 
 @androidx.compose.ui.tooling.preview.Preview(showBackground = true)

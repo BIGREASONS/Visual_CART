@@ -156,15 +156,22 @@ fun PayPalCheckoutBottomSheet(
 
                 is PayPalCheckoutUiState.Failure -> {
                     val originalListing = state.originalListing
-                    val canConvertToUsd = state.errorCode == "CURRENCY_NOT_SUPPORTED" &&
+                    val originalCartItems = state.originalCartItems
+                    val canConvertSingle = state.errorCode == "CURRENCY_NOT_SUPPORTED" &&
                         originalListing?.currency?.equals("INR", ignoreCase = true) == true
+                    val canConvertCart = state.errorCode == "CURRENCY_NOT_SUPPORTED" &&
+                        originalCartItems?.any { it.currency.equals("INR", ignoreCase = true) } == true
                     CheckoutFailureView(
                         state = state,
                         onRetry = { coordinator.retry(context) },
-                        onCheckoutInUsd = if (canConvertToUsd && originalListing != null) {
-                            { coordinator.checkoutInUsdExplicitly(context, originalListing) }
-                        } else {
-                            null
+                        onCheckoutInUsd = when {
+                            canConvertSingle && originalListing != null -> {
+                                { coordinator.checkoutInUsdExplicitly(context, originalListing) }
+                            }
+                            canConvertCart && originalCartItems != null -> {
+                                { coordinator.checkoutCartInUsdExplicitly(context, originalCartItems) }
+                            }
+                            else -> null
                         },
                         onCancel = onDismiss
                     )
@@ -363,7 +370,14 @@ private fun CheckoutOrderReadyView(
                 // Itemized Financial Rows (Server-Authoritative)
                 BreakdownRow(label = "Subtotal", value = state.formattedSubtotal)
                 Spacer(modifier = Modifier.height(8.dp))
-                BreakdownRow(label = "Applicable Tax (GST @ 18%)", value = state.formattedTax)
+                BreakdownRow(
+                    label = if (state.currency.equals("INR", ignoreCase = true)) {
+                        "Applicable Tax (GST @ 18%)"
+                    } else {
+                        "Estimated Tax"
+                    },
+                    value = state.formattedTax
+                )
                 Spacer(modifier = Modifier.height(8.dp))
                 BreakdownRow(
                     label = "Shipping & Handling",

@@ -389,6 +389,88 @@ class PayPalClient:
                     logger.error("PayPal create_order failed with non-JSON response (status %d)", e.response.status_code)
                     raise PayPalError(f"PayPal create_order failed: {e.response.text}", status_code=e.response.status_code) from e
 
+    async def create_order_from_payload(
+        self,
+        order_payload: Dict[str, Any],
+        total_amount: float,
+        currency_code: str,
+        mock_response: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Executes a pre-built multi-item/multi-seller PayPal Orders v2 payload."""
+        curr = (currency_code or self.default_currency).strip().upper()
+        effective_mock = mock_response or os.getenv("PAYPAL_MOCK_RESPONSE")
+        paypal_mode = (os.getenv("PAYPAL_MODE") or os.getenv("PAYPAL_ENV") or "sandbox").strip().lower()
+        if effective_mock and paypal_mode != "sandbox":
+            logger.critical("Security Violation: PayPal-Mock-Response requested when PAYPAL_MODE is '%s'", paypal_mode)
+            raise ValueError("PayPal-Mock-Response is strictly forbidden when PAYPAL_MODE is not 'sandbox'")
+
+        if not self.is_configured:
+            if effective_mock:
+                sim_issue = extract_mock_issue_code(effective_mock)
+                sim_debug_id = f"sbx_dbg_{uuid.uuid4().hex[:12]}"
+                sim_desc = (
+                    "The requested invoice ID was already used for an earlier order."
+                    if sim_issue == "DUPLICATE_INVOICE_ID"
+                    else f"Simulated mock failure for {sim_issue}"
+                )
+                sim_envelope = {
+                    "name": "UNPROCESSABLE_ENTITY",
+                    "details": [{"issue": sim_issue, "description": sim_desc}],
+                    "message": f"Simulation error for {sim_issue}",
+                    "debug_id": sim_debug_id,
+                }
+                raise parse_and_log_paypal_error(sim_envelope, status_code=422)
+
+            order_id = f"SBX-CART-{uuid.uuid4().hex[:10].upper()}"
+            order_record = {
+                "id": order_id,
+                "status": "CREATED",
+                "currency": curr,
+                "amount": float(total_amount),
+                "purchase_units": order_payload.get("purchase_units", []),
+                "links": [
+                    {
+                        "href": f"https://www.sandbox.paypal.com/checkoutnow?token={order_id}",
+                        "rel": "approve",
+                        "method": "GET",
+                    }
+                ],
+                "mock": True,
+            }
+            self._orders_store[order_id] = order_record
+            return order_record
+
+        token = await self.get_access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
+        if effective_mock:
+            if effective_mock.startswith("{"):
+                headers["PayPal-Mock-Response"] = effective_mock
+            else:
+                headers["PayPal-Mock-Response"] = json.dumps({"mock_application_codes": effective_mock})
+
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            try:
+                resp = await client.post(f"{self.base_url}/v2/checkout/orders", headers=headers, json=order_payload)
+                resp.raise_for_status()
+                data = resp.json()
+                data.setdefault("currency", curr)
+                data.setdefault("amount", float(total_amount))
+                return data
+            except httpx.HTTPStatusError as e:
+                try:
+                    error_json = e.response.json()
+                    raise parse_and_log_paypal_error(error_json, e.response.status_code) from e
+                except (ValueError, KeyError):
+                    logger.error("PayPal create_cart_order failed (status %d)", e.response.status_code)
+                    raise PayPalError(
+                        f"PayPal create_cart_order failed: {e.response.text}",
+                        status_code=e.response.status_code,
+                    ) from e
+
     async def get_order_details(self, order_id: str) -> Dict[str, Any]:
         """Retrieves PayPal order status and details (GET /v2/checkout/orders/{id})."""
         if not order_id or not order_id.strip():

@@ -2,6 +2,7 @@ package com.paypal.visualcart.feature.payment
 
 import android.content.Context
 import android.util.Log
+import com.paypal.visualcart.core.config.VisualCartSettingsStore
 import com.paypal.visualcart.domain.model.MerchantListing
 import java.util.Collections
 import java.util.Locale
@@ -43,7 +44,9 @@ sealed class PayPalCheckoutUiState {
         val currency: String = "INR",
         val isLiveSandbox: Boolean = false,
         val isAwaitingApproval: Boolean = false,
-        val originalListing: MerchantListing? = null
+        val originalListing: MerchantListing? = null,
+        val originalCartItems: List<PayPalBackendClient.CartOrderRequestItem>? = null,
+        val isCartCheckout: Boolean = false
     ) : PayPalCheckoutUiState() {
         val formattedSubtotal: String
             get() = PayPalCheckoutCoordinator.formatAmount(subtotal, currency)
@@ -82,13 +85,15 @@ sealed class PayPalCheckoutUiState {
         val errorCode: String? = null,
         val canRetry: Boolean = true,
         val lastOrderReady: OrderReady? = null,
-        val originalListing: MerchantListing? = null
+        val originalListing: MerchantListing? = null,
+        val originalCartItems: List<PayPalBackendClient.CartOrderRequestItem>? = null
     ) : PayPalCheckoutUiState()
 
     data class Cancelled(
         val orderId: String?,
         val message: String = "PayPal Checkout was cancelled.",
-        val originalListing: MerchantListing? = null
+        val originalListing: MerchantListing? = null,
+        val originalCartItems: List<PayPalBackendClient.CartOrderRequestItem>? = null
     ) : PayPalCheckoutUiState()
 }
 
@@ -114,6 +119,8 @@ class PayPalCheckoutCoordinator(
     private val capturingOrders = Collections.synchronizedSet(HashSet<String>())
 
     private var activeListing: MerchantListing? = null
+    private var activeCartItems: List<PayPalBackendClient.CartOrderRequestItem>? = null
+    private var activeConvertInrToUsd: Boolean = false
     private var lastOrderReadyState: PayPalCheckoutUiState.OrderReady? = null
 
     companion object {
@@ -151,6 +158,7 @@ class PayPalCheckoutCoordinator(
      */
     fun startCheckout(context: Any? = null, listing: MerchantListing) {
         activeListing = listing
+        activeCartItems = null
         lastOrderReadyState = null
         val verifiedPrice = listing.price
         if (!listing.hasVerifiedPrice || verifiedPrice == null || verifiedPrice <= 0.0 || !verifiedPrice.isFinite()) {
@@ -169,6 +177,11 @@ class PayPalCheckoutCoordinator(
 
         scope.launch(workDispatcher) {
             try {
+                if (context is Context) {
+                    backendClient.updatePreferredBaseUrl(
+                        VisualCartSettingsStore.getCustomBackendUrl(context)
+                    )
+                }
                 val isAvailable = backendClient.isBackendAvailable()
                 val orderReady = if (isAvailable) {
                     val orderResult = backendClient.createOrder(
@@ -249,6 +262,161 @@ class PayPalCheckoutCoordinator(
      * Explicitly converts a listing into USD settlement currency after user confirmation.
      * Never called silently on INR rejection.
      */
+    fun startCartCheckout(
+        context: Any? = null,
+        items: List<PayPalBackendClient.CartOrderRequestItem>,
+        convertInrToUsd: Boolean = false
+    ) {
+        if (items.isEmpty() || items.any { it.unitPrice <= 0.0 || !it.unitPrice.isFinite() }) {
+            _uiState.value = PayPalCheckoutUiState.Failure(
+                errorMessage = "Select at least one cart item with a verified live price before PayPal checkout.",
+                errorCode = "ERR_PRICE_UNAVAILABLE",
+                canRetry = false,
+                originalCartItems = items
+            )
+            return
+        }
+
+        val itemCurrencies = items.map { it.currency.trim().uppercase() }.distinct()
+        if (!convertInrToUsd && itemCurrencies.size > 1) {
+            if (itemCurrencies.all { it == "USD" || it == "INR" }) {
+                return startCartCheckout(context, items, convertInrToUsd = true)
+            }
+            _uiState.value = PayPalCheckoutUiState.Failure(
+                errorMessage = "Selected items span multiple currencies (${itemCurrencies.joinToString()}). Checkout items in the same currency.",
+                errorCode = "CURRENCY_MISMATCH",
+                canRetry = false,
+                originalCartItems = items
+            )
+            return
+        }
+
+        activeListing = null
+        activeCartItems = items
+        activeConvertInrToUsd = convertInrToUsd
+        lastOrderReadyState = null
+
+        val distinctMerchants = items.map { it.merchantName }.distinct()
+        val merchantLabel = when {
+            distinctMerchants.size == 1 -> distinctMerchants.first()
+            distinctMerchants.size <= 2 -> distinctMerchants.joinToString(" + ")
+            else -> "${distinctMerchants.first()} + ${distinctMerchants.size - 1} stores"
+        }
+        val titleLabel = if (items.size == 1) {
+            items.first().title
+        } else {
+            "Universal Cart (${items.size} items)"
+        }
+
+        _uiState.value = PayPalCheckoutUiState.Initializing(
+            productTitle = titleLabel,
+            merchantName = merchantLabel
+        )
+
+        scope.launch(workDispatcher) {
+            try {
+                if (context is Context) {
+                    backendClient.updatePreferredBaseUrl(
+                        VisualCartSettingsStore.getCustomBackendUrl(context)
+                    )
+                }
+                val isAvailable = backendClient.isBackendAvailable()
+                val targetCurrency = if (convertInrToUsd && itemCurrencies.contains("INR")) {
+                    "USD"
+                } else {
+                    itemCurrencies.first()
+                }
+                val orderReady = if (isAvailable) {
+                    val orderResult = backendClient.createCartOrder(
+                        items = items,
+                        currency = targetCurrency,
+                        convertInrToUsd = convertInrToUsd,
+                        returnUrl = PayPalDeepLinkHandler.RETURN_URL_PREFIX,
+                        cancelUrl = PayPalDeepLinkHandler.CANCEL_URL_PREFIX
+                    )
+                    if (orderResult == null) {
+                        val rawError = backendClient.lastErrorMessage
+                            ?: "Backend failed to create multi-item PayPal Sandbox order."
+                        val issueCode = parseIssueCode(rawError)
+                        _uiState.value = PayPalCheckoutUiState.Failure(
+                            errorMessage = rawError,
+                            errorCode = issueCode,
+                            canRetry = true,
+                            originalCartItems = items
+                        )
+                        return@launch
+                    }
+                    val summary = orderResult.orderSummary
+                    val rawSubtotal = summary?.subtotal ?: items.sumOf { it.unitPrice * it.quantity }
+                    val tax = summary?.gst ?: (Math.round(rawSubtotal * 0.08 * 100.0) / 100.0)
+                    val delivery = summary?.deliveryFee ?: 0.0
+                    val total = summary?.total ?: (rawSubtotal + tax + delivery)
+
+                    PayPalCheckoutUiState.OrderReady(
+                        orderId = orderResult.orderId,
+                        approvalUrl = orderResult.approveUrl.ifBlank { paymentAdapter.buildSandboxApprovalUrl(orderResult.orderId) },
+                        merchantName = summary?.merchantName ?: merchantLabel,
+                        productTitle = summary?.productTitle ?: titleLabel,
+                        quantity = items.sumOf { it.quantity },
+                        subtotal = rawSubtotal,
+                        applicableTax = tax,
+                        shippingFee = delivery,
+                        finalTotal = total,
+                        currency = orderResult.currency,
+                        isLiveSandbox = orderResult.isLiveSandbox,
+                        originalCartItems = items,
+                        isCartCheckout = true
+                    )
+                } else {
+                    val convertedSub = items.sumOf { item ->
+                        val p = if (convertInrToUsd && item.currency.equals("INR", ignoreCase = true)) {
+                            max(0.01, Math.round(item.unitPrice * DEFAULT_INR_TO_USD_RATE * 100.0) / 100.0)
+                        } else {
+                            item.unitPrice
+                        }
+                        p * item.quantity
+                    }
+                    val subtotalRounded = Math.round(convertedSub * 100.0) / 100.0
+                    val taxRounded = Math.round(subtotalRounded * 0.08 * 100.0) / 100.0
+                    val totalRounded = Math.round((subtotalRounded + taxRounded) * 100.0) / 100.0
+                    val simOrderId = "SBX-CART-" + UUID.randomUUID().toString().replace("-", "").take(10).uppercase()
+                    PayPalCheckoutUiState.OrderReady(
+                        orderId = simOrderId,
+                        approvalUrl = paymentAdapter.buildSandboxApprovalUrl(simOrderId),
+                        merchantName = merchantLabel,
+                        productTitle = titleLabel,
+                        quantity = items.sumOf { it.quantity },
+                        subtotal = subtotalRounded,
+                        applicableTax = taxRounded,
+                        shippingFee = 0.0,
+                        finalTotal = totalRounded,
+                        currency = targetCurrency,
+                        isLiveSandbox = false,
+                        originalCartItems = items,
+                        isCartCheckout = true
+                    )
+                }
+
+                lastOrderReadyState = orderReady
+                _uiState.value = orderReady
+            } catch (e: Exception) {
+                logE(TAG, "Error creating multi-item cart order", e)
+                _uiState.value = PayPalCheckoutUiState.Failure(
+                    errorMessage = "Cart checkout failed: ${e.message ?: "Unknown error"}",
+                    canRetry = true,
+                    originalCartItems = items
+                )
+            }
+        }
+    }
+
+    fun checkoutCartInUsdExplicitly(
+        context: Any? = null,
+        items: List<PayPalBackendClient.CartOrderRequestItem>
+    ) {
+        startCartCheckout(context = context, items = items, convertInrToUsd = true)
+    }
+
     fun checkoutInUsdExplicitly(
         context: Any? = null,
         listing: MerchantListing,
@@ -474,6 +642,10 @@ class PayPalCheckoutCoordinator(
             is PayPalCheckoutUiState.Failure -> {
                 if (current.orderId != null && current.lastOrderReady != null) {
                     executeCapture(current.orderId, "")
+                } else if (current.originalCartItems != null) {
+                    startCartCheckout(context, current.originalCartItems, activeConvertInrToUsd)
+                } else if (activeCartItems != null) {
+                    startCartCheckout(context, activeCartItems!!, activeConvertInrToUsd)
                 } else if (current.originalListing != null) {
                     startCheckout(context, current.originalListing)
                 } else if (activeListing != null) {
@@ -481,7 +653,11 @@ class PayPalCheckoutCoordinator(
                 }
             }
             is PayPalCheckoutUiState.Cancelled -> {
-                if (activeListing != null) {
+                if (current.originalCartItems != null) {
+                    startCartCheckout(context, current.originalCartItems, activeConvertInrToUsd)
+                } else if (activeCartItems != null) {
+                    startCartCheckout(context, activeCartItems!!, activeConvertInrToUsd)
+                } else if (activeListing != null) {
                     startCheckout(context, activeListing!!)
                 }
             }

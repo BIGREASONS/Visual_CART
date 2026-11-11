@@ -660,6 +660,146 @@ async def create_paypal_order(req: CreateOrderRequest, request: Request):
     )
 
 
+@app.post("/api/v1/payments/paypal/create-cart-order")
+@app.post("/api/paypal/create-cart-order")
+async def create_cart_paypal_order(req: Dict[str, Any], request: Request):
+    """Creates a multi-item Universal Cart PayPal Orders v2 checkout order."""
+    root_str = str(_root_dir)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from backend.cart_orders import CreateCartOrderRequest, build_cart_paypal_order_payload
+
+    try:
+        cart_req = CreateCartOrderRequest(**req)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    mock_header = (
+        request.headers.get("PayPal-Mock-Response")
+        or request.headers.get("paypal-mock-response")
+        or cart_req.mock_response
+    )
+    if mock_header and PAYPAL_MODE != "sandbox":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="PayPal-Mock-Response header is strictly forbidden when PAYPAL_MODE is not 'sandbox'",
+        )
+
+    try:
+        built = build_cart_paypal_order_payload(
+            cart_req,
+            default_currency=DEFAULT_CURRENCY,
+            default_tax_rate=DEFAULT_TAX_RATE,
+            default_inr_to_usd_rate=INR_TO_USD_RATE,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    curr = built["currency"]
+    order_payload = built["order_payload"]
+    return_url = cart_req.return_url or "paypalvisualcart://checkout/success"
+    summary = {
+        "subtotal": built["subtotal"],
+        "tax": built["tax"],
+        "delivery_fee": built["delivery_fee"],
+        "total": built["total"],
+        "currency": curr,
+        "item_count": built["item_count"],
+    }
+
+    if has_live_paypal_credentials():
+        token = await get_paypal_access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
+        if mock_header:
+            headers["PayPal-Mock-Response"] = (
+                mock_header if mock_header.startswith("{") else json.dumps({"mock_application_codes": mock_header})
+            )
+
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            try:
+                response = await client.post(
+                    f"{PAYPAL_BASE_URL}/v2/checkout/orders",
+                    headers=headers,
+                    json=order_payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+                order_id = data["id"]
+                status_str = data.get("status", "CREATED")
+                approve_url = next(
+                    (link.get("href") for link in data.get("links", []) if link.get("rel") == "approve"),
+                    f"https://www.sandbox.paypal.com/checkoutnow?token={order_id}",
+                )
+                return {
+                    "order_id": order_id,
+                    "status": status_str,
+                    "approve_url": approve_url,
+                    "currency": curr,
+                    "amount": built["total"],
+                    "order_summary": summary,
+                    "item_count": built["item_count"],
+                    "merchant_count": built["merchant_count"],
+                    "merchants": built["merchants"],
+                    "is_multi_seller": built["is_multi_seller"],
+                    "is_live_sandbox": True,
+                }
+            except httpx.HTTPStatusError as e:
+                try:
+                    error_json = e.response.json()
+                    debug_id = error_json.get("debug_id")
+                    details = error_json.get("details", [])
+                    issue = details[0].get("issue") if details else error_json.get("name", "PAYPAL_ERROR")
+                    desc = details[0].get("description") if details else error_json.get("message", e.response.text)
+                    error_detail = f"PayPal error [{issue}] (debug_id: {debug_id}): {desc}"
+                except Exception:
+                    error_detail = f"PayPal Orders v2 error: {e.response.text}"
+                raise HTTPException(status_code=e.response.status_code, detail=error_detail)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Failed to communicate with PayPal: {str(e)}",
+                )
+
+    if mock_header:
+        sim_debug_id = f"sbx_dbg_{uuid.uuid4().hex[:12]}"
+        sim_issue = extract_mock_issue_code(mock_header)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"PayPal error [{sim_issue}] (debug_id: {sim_debug_id}): Simulated mock failure for {sim_issue}",
+        )
+
+    simulated_order_id = "SBX-CART-" + uuid.uuid4().hex[:10].upper()
+    host_url = str(request.base_url).rstrip("/")
+    approve_url = f"{host_url}/api/v1/payments/paypal/mock-approve?order_id={simulated_order_id}&return_url={return_url}"
+    _simulated_orders[simulated_order_id] = {
+        "id": simulated_order_id,
+        "status": "CREATED",
+        "currency": curr,
+        "amount": built["total"],
+        "summary": summary,
+        "purchase_units": order_payload.get("purchase_units", []),
+        "created_at": time.time(),
+        "return_url": return_url,
+    }
+    return {
+        "order_id": simulated_order_id,
+        "status": "CREATED",
+        "approve_url": approve_url,
+        "currency": curr,
+        "amount": built["total"],
+        "order_summary": summary,
+        "item_count": built["item_count"],
+        "merchant_count": built["merchant_count"],
+        "merchants": built["merchants"],
+        "is_multi_seller": built["is_multi_seller"],
+        "is_live_sandbox": False,
+    }
+
+
 @app.post("/api/v1/payments/paypal/capture-order", response_model=CaptureOrderResponse)
 @app.post("/api/paypal/capture-order", response_model=CaptureOrderResponse)
 async def capture_paypal_order(req: CaptureOrderRequest, request: Request):
@@ -1071,25 +1211,108 @@ async def recognize_product(req: RecognizeProductRequest):
 
 
 @app.get("/api/merchants/search")
-async def search_merchants(q: str):
-    """Returns honest direct merchant search URLs (no fabricated prices, stock, or delivery claims)."""
+async def search_merchants(
+    q: str,
+    country: Optional[str] = None,
+    currency: Optional[str] = None,
+    include_search_links: bool = True,
+    user_id: Optional[str] = None,
+):
+    """Returns Channel3 live multi-merchant offers when configured plus honest direct search links."""
     root_str = str(_root_dir)
     if root_str not in sys.path:
         sys.path.insert(0, root_str)
-    from backend.gemini_client import build_merchant_search_response
+    from backend.discovery_service import search_merchants_unified
 
-    return build_merchant_search_response(q)
+    return await search_merchants_unified(
+        q=q,
+        country=country,
+        currency=currency,
+        include_search_links=include_search_links,
+        user_id=user_id,
+    )
+
+
+@app.post("/api/v1/products/search")
+@app.post("/api/products/search")
+async def search_products_endpoint(payload: Dict[str, Any]):
+    """Searches Channel3 for live offers by query, base64_image, or image_url."""
+    root_str = str(_root_dir)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from backend.discovery_service import ProductSearchRequest, discover_products
+
+    try:
+        req = ProductSearchRequest(**payload)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    return await discover_products(req)
+
+
+@app.post("/api/v1/products/lookup")
+@app.post("/api/products/lookup")
+async def lookup_product_endpoint(payload: Dict[str, Any]):
+    """Resolves a shared retailer URL via Channel3 /v1/lookup or SSRF-safe JSON-LD fallback."""
+    root_str = str(_root_dir)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from backend.discovery_service import ProductLookupRequest, lookup_product_by_url
+    from backend.page_extractor import UnsafeTargetUrlError
+
+    try:
+        req = ProductLookupRequest(**payload)
+        return await lookup_product_by_url(req)
+    except UnsafeTargetUrlError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+
+@app.get("/api/v1/products/{product_id}")
+@app.get("/api/products/{product_id}")
+async def refresh_product_endpoint(
+    product_id: str,
+    country: Optional[str] = None,
+    currency: Optional[str] = None,
+    user_id: Optional[str] = None,
+):
+    """Refreshes live product offers and short-lived checkout URLs via free Channel3 GET /v1/products/{id}."""
+    root_str = str(_root_dir)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from backend.discovery_service import refresh_product_by_id
+
+    result = await refresh_product_by_id(
+        product_id=product_id,
+        country=country,
+        currency=currency,
+        user_id=user_id,
+    )
+    if not result.get("ok"):
+        code = int(result.get("status_code") or 404)
+        raise HTTPException(
+            status_code=code if 400 <= code < 600 else status.HTTP_502_BAD_GATEWAY,
+            detail=result.get("error") or "Failed to refresh product",
+        )
+    return result
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    root_str = str(_root_dir)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from backend.channel3_client import Channel3Client
+
     client = _get_gemini_client()
+    channel3 = Channel3Client()
     return {
         "status": "healthy",
         "service": "paypal-visual-cart-backend",
         "has_paypal_credentials": has_live_paypal_credentials(),
         "has_gemini_api_key": bool(get_gemini_api_key()),
+        "channel3_configured": channel3.is_configured,
         "gemini_configured": client.is_configured,
         "mode": PAYPAL_MODE,
         "gemini_model": client.model_name,

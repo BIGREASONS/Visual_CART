@@ -21,6 +21,7 @@ interface CartDao {
     // Listings
     suspend fun insertListing(listing: MerchantListingEntity): Long
     suspend fun insertListings(listings: List<MerchantListingEntity>)
+    suspend fun replaceListingsForProduct(productId: String, listings: List<MerchantListingEntity>)
     suspend fun getListingsForProduct(productId: String): List<MerchantListingEntity>
     suspend fun setSelectedListing(productId: String, listingId: String)
     suspend fun deleteListing(id: String)

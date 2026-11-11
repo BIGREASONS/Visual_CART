@@ -23,7 +23,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -37,17 +40,21 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,12 +62,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.paypal.visualcart.core.config.VisualCartSettingsStore
 import com.paypal.visualcart.core.designsystem.ButtonVariant
+import com.paypal.visualcart.feature.ai.GeminiFreeVisionProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.paypal.visualcart.core.designsystem.DeepInk
 import com.paypal.visualcart.core.designsystem.DemoDataBadge
 import com.paypal.visualcart.core.designsystem.ForestGreen
@@ -79,10 +92,27 @@ import com.paypal.visualcart.core.designsystem.VisualCartIcons
 import com.paypal.visualcart.core.designsystem.VisualCartTypography
 import com.paypal.visualcart.core.designsystem.WarmIvory
 
-enum class AiProviderOption(val title: String, val subtitle: String) {
-    ON_DEVICE_NANO("Local On-Device (Heuristic OCR)", "Offline text attribute extraction with zero cloud billing"),
-    CLOUD_GEMINI("Gemini 3.5 Flash-Lite (Free Tier)", "Google AI Studio free tier · \$0 spend cap · zero paid fallback"),
-    DEMO_FIXTURES("Curated Demo Fixtures", "Deterministic sample listings for offline hackathon testing")
+enum class AiProviderOption(val modeKey: String, val title: String, val subtitle: String) {
+    ON_DEVICE_NANO(
+        VisualCartSettingsStore.MODE_ON_DEVICE,
+        "Local On-Device (Heuristic OCR)",
+        "Offline text attribute extraction with zero cloud billing"
+    ),
+    CLOUD_GEMINI(
+        VisualCartSettingsStore.MODE_CLOUD_GEMINI,
+        "Gemini 3.5 Flash-Lite (Free Tier)",
+        "Google AI Studio free tier · \$0 spend cap · zero paid fallback"
+    ),
+    DEMO_FIXTURES(
+        VisualCartSettingsStore.MODE_DEMO_FIXTURES,
+        "Curated Demo Fixtures",
+        "Deterministic sample listings for offline hackathon testing"
+    );
+
+    companion object {
+        fun fromModeKey(key: String): AiProviderOption =
+            values().firstOrNull { it.modeKey == key } ?: CLOUD_GEMINI
+    }
 }
 
 @Composable
@@ -91,10 +121,25 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var floatingBubbleEnabled by remember { mutableStateOf(com.paypal.visualcart.service.overlay.VisualCartOverlayService.isRunning) }
-    var demoDataEnabled by remember { mutableStateOf(true) }
-    var selectedAiProvider by remember { mutableStateOf(AiProviderOption.CLOUD_GEMINI) }
+    var demoDataEnabled by remember { mutableStateOf(VisualCartSettingsStore.isDemoDataEnabled(context)) }
+    var selectedAiProvider by remember {
+        mutableStateOf(AiProviderOption.fromModeKey(VisualCartSettingsStore.getAiProviderMode(context)))
+    }
+    var backendUrlInput by remember {
+        mutableStateOf(VisualCartSettingsStore.getCustomBackendUrl(context).orEmpty())
+    }
+    var directApiKeyInput by remember {
+        mutableStateOf(VisualCartSettingsStore.getDirectGeminiApiKey(context).orEmpty())
+    }
+    var isTestingConnection by remember { mutableStateOf(false) }
+    var connectionStatusText by remember { mutableStateOf<String?>(null) }
+    var connectionStatusSuccess by remember { mutableStateOf<Boolean?>(null) }
     var showClearHistoryDialog by remember { mutableStateOf(false) }
+    var selectedDiscoveryCountry by remember {
+        mutableStateOf(VisualCartSettingsStore.getDiscoveryCountry(context))
+    }
 
     var hasOverlayPermission by remember {
         mutableStateOf(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(context) else true)
@@ -389,13 +434,19 @@ fun SettingsScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
-                                    .clickable { selectedAiProvider = option }
+                                    .clickable {
+                                        selectedAiProvider = option
+                                        VisualCartSettingsStore.setAiProviderMode(context, option.modeKey)
+                                    }
                                     .padding(vertical = 6.dp),
                                 verticalAlignment = Alignment.Top
                             ) {
                                 RadioButton(
                                     selected = isSelected,
-                                    onClick = { selectedAiProvider = option },
+                                    onClick = {
+                                        selectedAiProvider = option
+                                        VisualCartSettingsStore.setAiProviderMode(context, option.modeKey)
+                                    },
                                     colors = RadioButtonDefaults.colors(
                                         selectedColor = ForestGreen,
                                         unselectedColor = MutedSlate
@@ -419,6 +470,192 @@ fun SettingsScreen(
                                         )
                                     )
                                 }
+                            }
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(1.dp)
+                                .background(StoneLight)
+                        )
+
+                        // Free-Tier AI Backend URL & Optional Direct Key (5G / Offline PC Backup)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "Free-Tier AI Connection (\$0 Cap)",
+                                style = VisualCartTypography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = DeepInk
+                                )
+                            )
+                            Text(
+                                text = "Uses USB adb reverse (localhost:8000) by default. Add your PC Wi-Fi IP or a free Google AI Studio API key to work away from USB (5G / Wi-Fi).",
+                                style = VisualCartTypography.bodySmall.copy(
+                                    color = MutedSlate,
+                                    fontSize = 11.sp
+                                )
+                            )
+
+                            OutlinedTextField(
+                                value = backendUrlInput,
+                                onValueChange = { backendUrlInput = it },
+                                label = { Text("Backend Server URL (Optional)") },
+                                placeholder = { Text("http://192.168.1.8:8000 or https://...") },
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = ForestGreen,
+                                    focusedLabelColor = ForestGreen,
+                                    cursorColor = ForestGreen
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            OutlinedTextField(
+                                value = directApiKeyInput,
+                                onValueChange = { directApiKeyInput = it },
+                                label = { Text("Direct Google AI Studio Key (Optional, 5G)") },
+                                placeholder = { Text("gemini-3.5-flash-lite free tier only") },
+                                singleLine = true,
+                                visualTransformation = PasswordVisualTransformation(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = ForestGreen,
+                                    focusedLabelColor = ForestGreen,
+                                    cursorColor = ForestGreen
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Channel3 Live Offer Region & Currency",
+                                style = VisualCartTypography.labelMedium.copy(
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = DeepInk
+                                )
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                VisualCartSettingsStore.SUPPORTED_DISCOVERY_LOCALES.forEach { (countryCode, currCode) ->
+                                    val selected = selectedDiscoveryCountry == countryCode
+                                    FilterChip(
+                                        selected = selected,
+                                        onClick = {
+                                            selectedDiscoveryCountry = countryCode
+                                            VisualCartSettingsStore.setDiscoveryLocale(context, countryCode, currCode)
+                                            Toast.makeText(
+                                                context,
+                                                "Live offers set to $countryCode ($currCode)",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        },
+                                        label = {
+                                            Text(
+                                                text = "$countryCode ($currCode)",
+                                                style = VisualCartTypography.labelSmall.copy(
+                                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                                                )
+                                            )
+                                        },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = ForestGreenLight,
+                                            selectedLabelColor = ForestGreen
+                                        )
+                                    )
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                VisualCartButton(
+                                    text = if (isTestingConnection) "Testing…" else "Save & Test Connection",
+                                    onClick = {
+                                        if (!isTestingConnection) {
+                                            val savedUrl = VisualCartSettingsStore.setCustomBackendUrl(context, backendUrlInput)
+                                            backendUrlInput = savedUrl.orEmpty()
+                                            VisualCartSettingsStore.setDirectGeminiApiKey(context, directApiKeyInput)
+                                            isTestingConnection = true
+                                            connectionStatusText = null
+                                            scope.launch {
+                                                val (result, c3Ready) = withContext(Dispatchers.IO) {
+                                                    val aiRes = GeminiFreeVisionProvider.forBackend(context).verifyModelAvailability()
+                                                    var channel3Ready = false
+                                                    for (base in VisualCartSettingsStore.resolveCandidateBackendUrls(context)) {
+                                                        try {
+                                                            val conn = (java.net.URL("${base.trimEnd('/')}/health").openConnection() as java.net.HttpURLConnection).apply {
+                                                                requestMethod = "GET"
+                                                                connectTimeout = 2500
+                                                                readTimeout = 3000
+                                                            }
+                                                            if (conn.responseCode == 200) {
+                                                                val body = conn.inputStream.bufferedReader().readText()
+                                                                val parsed = com.paypal.visualcart.core.util.SimpleJson.parseObject(body)
+                                                                channel3Ready = (parsed?.get("channel3_configured") as? Boolean) ?: false
+                                                                conn.disconnect()
+                                                                break
+                                                            }
+                                                            conn.disconnect()
+                                                        } catch (_: Exception) {
+                                                        }
+                                                    }
+                                                    aiRes to channel3Ready
+                                                }
+                                                isTestingConnection = false
+                                                connectionStatusSuccess = result.available || c3Ready
+                                                val c3Label = if (c3Ready) "Channel3 Live: ON" else "Channel3 Live: OFF"
+                                                connectionStatusText = buildString {
+                                                    append(
+                                                        result.reason ?: if (result.available) {
+                                                            "AI Connected (${result.modelName})"
+                                                        } else {
+                                                            "AI Connection failed"
+                                                        }
+                                                    )
+                                                    append(" · ")
+                                                    append(c3Label)
+                                                }
+                                            }
+                                        }
+                                    },
+                                    variant = ButtonVariant.PRIMARY,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(
+                                    onClick = {
+                                        backendUrlInput = ""
+                                        VisualCartSettingsStore.setCustomBackendUrl(context, null)
+                                        Toast.makeText(context, "Reset to USB localhost:8000", Toast.LENGTH_SHORT).show()
+                                    }
+                                ) {
+                                    Text(
+                                        text = "USB Default",
+                                        style = VisualCartTypography.labelSmall.copy(
+                                            color = ForestGreen,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    )
+                                }
+                            }
+
+                            connectionStatusText?.let { status ->
+                                val isOk = connectionStatusSuccess == true
+                                Text(
+                                    text = status,
+                                    style = VisualCartTypography.bodySmall.copy(
+                                        color = if (isOk) ForestGreen else Terracotta,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 11.sp
+                                    )
+                                )
                             }
                         }
 
@@ -456,7 +693,10 @@ fun SettingsScreen(
 
                             Switch(
                                 checked = demoDataEnabled,
-                                onCheckedChange = { demoDataEnabled = it },
+                                onCheckedChange = {
+                                    demoDataEnabled = it
+                                    VisualCartSettingsStore.setDemoDataEnabled(context, it)
+                                },
                                 colors = SwitchDefaults.colors(
                                     checkedThumbColor = PureWhite,
                                     checkedTrackColor = ForestGreen,

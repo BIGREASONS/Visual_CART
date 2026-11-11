@@ -82,7 +82,10 @@ data class MerchantListing(
         id.contains("_demo_", ignoreCase = true) -> ListingOrigin.DEMO_DATA
         else -> ListingOrigin.VERIFIED_CATALOG_FIXTURE
     },
-    val isReferencePriceVerified: Boolean = false
+    val isReferencePriceVerified: Boolean = false,
+    val providerProductId: String? = null,
+    val offerSource: String? = null,
+    val commissionRate: Double? = null
 ) {
     init {
         when (listingOrigin) {

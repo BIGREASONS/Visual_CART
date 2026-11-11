@@ -101,7 +101,8 @@ data class SavedProductUiModel(
     val matchType: MatchType,
     val confidence: Float,
     val priceDropPercent: Int? = null,
-    val isDemo: Boolean = true
+    val isDemo: Boolean = true,
+    val currency: String = "INR"
 )
 
 @Composable
@@ -762,7 +763,7 @@ private fun RecentSavedProductCard(
                     )
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text(
-                            text = "₹${item.bestPrice.toInt()}",
+                            text = com.paypal.visualcart.core.util.CurrencyFormatter.format(item.bestPrice, item.currency),
                             style = VisualCartTypography.titleLarge.copy(
                                 fontWeight = FontWeight.Bold,
                                 color = DeepInk
@@ -771,7 +772,7 @@ private fun RecentSavedProductCard(
                         if (item.originalPrice != null && item.originalPrice > item.bestPrice) {
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "₹${item.originalPrice.toInt()}",
+                                text = com.paypal.visualcart.core.util.CurrencyFormatter.format(item.originalPrice, item.currency),
                                 style = VisualCartTypography.bodySmall.copy(
                                     textDecoration = TextDecoration.LineThrough,
                                     color = MutedSlate

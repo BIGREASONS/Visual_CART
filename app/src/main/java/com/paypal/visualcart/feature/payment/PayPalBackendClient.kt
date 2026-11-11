@@ -65,11 +65,22 @@ open class PayPalBackendClient(
     private var detectedBaseUrl: String? = null
 
     @Volatile
+    private var preferredBaseUrlOverride: String? = null
+
+    @Volatile
     var lastErrorMessage: String? = null
         protected set
 
     val baseUrl: String
-        get() = detectedBaseUrl ?: configuredBaseUrl?.takeIf { it.isNotBlank() } ?: resolveBaseUrl()
+        get() = detectedBaseUrl
+            ?: preferredBaseUrlOverride
+            ?: configuredBaseUrl?.takeIf { it.isNotBlank() }
+            ?: resolveBaseUrl()
+
+    open fun updatePreferredBaseUrl(url: String?) {
+        preferredBaseUrlOverride = url?.trim()?.trimEnd('/')?.takeIf { it.isNotBlank() }
+        detectedBaseUrl = null
+    }
 
     companion object {
         const val DEFAULT_EMULATOR_URL = "http://10.0.2.2:8000"
@@ -88,18 +99,29 @@ open class PayPalBackendClient(
 
     /**
      * Checks if the backend server is reachable and responding.
-     * Automatically adapts between Android emulator (10.0.2.2) and physical USB device (localhost via adb reverse).
+     * Automatically adapts between configured LAN/tunnel URL, USB ADB reverse (localhost),
+     * and Android emulator (10.0.2.2).
      */
     open fun isBackendAvailable(): Boolean {
-        val candidate = configuredBaseUrl?.takeIf { it.isNotBlank() } ?: resolveBaseUrl()
-        if (checkHealth(candidate)) {
-            detectedBaseUrl = candidate
-            return true
+        val ordered = linkedSetOf<String>()
+        preferredBaseUrlOverride?.let { ordered.add(it) }
+        configuredBaseUrl?.takeIf { it.isNotBlank() }?.let { ordered.add(it.trimEnd('/')) }
+        val resolved = resolveBaseUrl().trimEnd('/')
+        if (resolved == DEFAULT_EMULATOR_URL) {
+            ordered.add(DEFAULT_LOCALHOST_URL)
+            ordered.add(DEFAULT_EMULATOR_URL)
+        } else {
+            ordered.add(resolved)
+            ordered.add(DEFAULT_LOCALHOST_URL)
+            ordered.add(DEFAULT_EMULATOR_URL)
         }
-        if (candidate == DEFAULT_EMULATOR_URL && checkHealth(DEFAULT_LOCALHOST_URL)) {
-            detectedBaseUrl = DEFAULT_LOCALHOST_URL
-            return true
+        for (target in ordered) {
+            if (checkHealth(target)) {
+                detectedBaseUrl = target
+                return true
+            }
         }
+        detectedBaseUrl = null
         return false
     }
 
@@ -202,6 +224,119 @@ open class PayPalBackendClient(
             status = status,
             approveUrl = approveUrl,
             currency = currency,
+            amount = amount,
+            isLiveSandbox = isLive,
+            orderSummary = summary
+        )
+    }
+
+    data class CartOrderRequestItem(
+        val title: String,
+        val unitPrice: Double,
+        val quantity: Int = 1,
+        val currency: String = "USD",
+        val merchantName: String = "Visual Cart",
+        val listingId: String? = null,
+        val productId: String? = null,
+        val productUrl: String? = null,
+        val offerSource: String? = null
+    )
+
+    /**
+     * Calls POST /api/v1/payments/paypal/create-cart-order for multi-item Universal Cart checkout.
+     */
+    open fun createCartOrder(
+        items: List<CartOrderRequestItem>,
+        currency: String? = null,
+        convertInrToUsd: Boolean = false,
+        returnUrl: String = DEFAULT_RETURN_URL,
+        cancelUrl: String = DEFAULT_CANCEL_URL,
+        taxRate: Double = 0.08,
+        deliveryFee: Double = 0.0
+    ): CreateOrderServerResult? {
+        if (items.isEmpty() || items.any { it.unitPrice <= 0.0 || !it.unitPrice.isFinite() }) {
+            lastErrorMessage = "ERR_PRICE_UNAVAILABLE: All selected cart items require valid verified prices."
+            return null
+        }
+
+        val itemMaps = items.map { item ->
+            buildMap<String, Any?> {
+                put("title", item.title)
+                put("unit_price", item.unitPrice)
+                put("quantity", item.quantity.coerceIn(1, 99))
+                put("currency", item.currency.uppercase())
+                put("merchant_name", item.merchantName)
+                item.listingId?.let { put("listing_id", it) }
+                item.productId?.let { put("product_id", it) }
+                item.productUrl?.let { put("product_url", it) }
+                item.offerSource?.let { put("offer_source", it) }
+            }
+        }
+        val payload = com.paypal.visualcart.core.util.SimpleJson.encode(
+            buildMap<String, Any?> {
+                put("items", itemMaps)
+                if (!currency.isNullOrBlank()) put("currency", currency.uppercase())
+                put("convert_inr_to_usd", convertInrToUsd)
+                put("tax_rate", taxRate)
+                put("delivery_fee", deliveryFee)
+                put("return_url", returnUrl)
+                put("cancel_url", cancelUrl)
+            }
+        )
+
+        val responseText = executePost("$baseUrl/api/v1/payments/paypal/create-cart-order", payload)
+            ?: return null
+
+        val root = try {
+            com.paypal.visualcart.core.util.SimpleJson.parseObject(responseText)
+        } catch (_: Exception) {
+            null
+        } ?: return null
+
+        val orderId = root["order_id"] as? String ?: return null
+        val status = root["status"] as? String ?: "CREATED"
+        val approveUrl = root["approve_url"] as? String ?: ""
+        val resolvedCurrency = root["currency"] as? String ?: items.first().currency
+        val rawFallbackSub = items.sumOf { it.unitPrice * it.quantity }
+        val amount = (root["amount"] as? Number)?.toDouble() ?: rawFallbackSub
+        val isLive = (root["is_live_sandbox"] as? Boolean) ?: false
+
+        @Suppress("UNCHECKED_CAST")
+        val summaryObj = root["order_summary"] as? Map<String, Any?>
+        val subtotal = (summaryObj?.get("subtotal") as? Number)?.toDouble() ?: rawFallbackSub
+        val tax = (summaryObj?.get("tax") as? Number)?.toDouble() ?: 0.0
+        val delivery = (summaryObj?.get("delivery_fee") as? Number)?.toDouble() ?: deliveryFee
+        val total = (summaryObj?.get("total") as? Number)?.toDouble() ?: amount
+
+        val merchantLabel = items.map { it.merchantName }.distinct().let { list ->
+            when {
+                list.size == 1 -> list.first()
+                list.size <= 2 -> list.joinToString(" + ")
+                else -> "${list.first()} + ${list.size - 1} stores"
+            }
+        }
+        val summaryTitle = if (items.size == 1) {
+            items.first().title
+        } else {
+            "${items.size} items (${items.first().title.take(28)}…)"
+        }
+
+        val summary = OrderSummary(
+            listingId = items.first().listingId ?: "universal_cart",
+            productTitle = summaryTitle,
+            merchantName = merchantLabel,
+            subtotal = subtotal,
+            gst = tax,
+            deliveryFee = delivery,
+            total = total,
+            currency = resolvedCurrency
+        )
+
+        return CreateOrderServerResult(
+            orderId = orderId,
+            status = status,
+            approveUrl = approveUrl,
+            currency = resolvedCurrency,
             amount = amount,
             isLiveSandbox = isLive,
             orderSummary = summary

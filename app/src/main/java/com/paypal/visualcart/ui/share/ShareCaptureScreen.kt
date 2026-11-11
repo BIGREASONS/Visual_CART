@@ -97,12 +97,7 @@ import com.paypal.visualcart.domain.model.RecognizedProduct
 import com.paypal.visualcart.domain.model.RecognizedProductCandidate
 import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
 
-private fun shareCurrencySymbol(currency: String): String = when (currency.uppercase()) {
-    "USD" -> "$"
-    "EUR" -> "€"
-    "GBP" -> "£"
-    else -> "₹"
-}
+import com.paypal.visualcart.core.util.CurrencyFormatter
 
 sealed interface ShareCaptureUiState {
     data class Loading(
@@ -143,7 +138,8 @@ sealed interface ShareCaptureUiState {
         val candidates: List<RecognizedProductCandidate> = emptyList(),
         val canRetry: Boolean = false,
         val detectedCategory: String? = null,
-        val rateLimited: Boolean = false
+        val rateLimited: Boolean = false,
+        val showSettingsAction: Boolean = false
     ) : ShareCaptureUiState
 }
 
@@ -158,6 +154,7 @@ fun ShareCaptureDialog(
     onSubmitManualQuery: (String) -> Unit = {},
     onEditQuery: () -> Unit = {},
     onRetryRecognition: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Dimmed background scrim
@@ -197,6 +194,7 @@ fun ShareCaptureDialog(
                             state = uiState,
                             onSubmitQuery = onSubmitManualQuery,
                             onRetryRecognition = onRetryRecognition,
+                            onOpenSettings = onOpenSettings,
                             onDismiss = onDismiss
                         )
                     }
@@ -507,7 +505,6 @@ private fun ShareMatchedContent(
 
         if (summary != null && summary.hasComparableBestPrice && lowestListing != null && lowestListing.price != null) {
             val savings = (summary.verifiedSavings ?: summary.maxSavings).coerceAtLeast(0.0)
-            val sym = shareCurrencySymbol(lowestListing.currency)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -528,7 +525,7 @@ private fun ShareMatchedContent(
                         )
                     )
                     Text(
-                        text = "${lowestListing.merchantName} · $sym${lowestListing.price.toInt()}",
+                        text = "${lowestListing.merchantName} · ${CurrencyFormatter.format(lowestListing.price, lowestListing.currency)}",
                         style = VisualCartTypography.bodyMedium.copy(
                             fontWeight = FontWeight.Bold,
                             color = DeepInk
@@ -544,7 +541,7 @@ private fun ShareMatchedContent(
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = "Save $sym${savings.toInt()}",
+                            text = "Save ${CurrencyFormatter.format(savings, lowestListing.currency)}",
                             style = VisualCartTypography.labelSmall.copy(
                                 fontWeight = FontWeight.Bold,
                                 color = PureWhite
@@ -554,7 +551,6 @@ private fun ShareMatchedContent(
                 }
             }
         } else if (lowestListing != null && lowestListing.price != null) {
-            val sym = shareCurrencySymbol(lowestListing.currency)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -575,7 +571,7 @@ private fun ShareMatchedContent(
                         )
                     )
                     Text(
-                        text = "${lowestListing.merchantName} · $sym${lowestListing.price.toInt()}",
+                        text = "${lowestListing.merchantName} · ${CurrencyFormatter.format(lowestListing.price, lowestListing.currency)}",
                         style = VisualCartTypography.bodyMedium.copy(
                             fontWeight = FontWeight.Bold,
                             color = DeepInk
@@ -649,10 +645,9 @@ private fun ShareMatchedContent(
 
         // Primary Action: Add to Visual Cart
         val selectedPrice = state.selectedListing.price
-        val selectedSym = shareCurrencySymbol(state.selectedListing.currency)
         VisualCartButton(
             text = if (state.selectedListing.hasVerifiedPrice && selectedPrice != null) {
-                "ADD TO VISUAL CART ($selectedSym${selectedPrice.toInt()})"
+                "ADD TO VISUAL CART (${CurrencyFormatter.format(selectedPrice, state.selectedListing.currency)})"
             } else {
                 "SAVE STORE SEARCH LINK"
             },
@@ -727,9 +722,8 @@ private fun ShareMerchantCard(
             Row(verticalAlignment = Alignment.Bottom) {
                 val verifiedPrice = listing.price
                 if (listing.hasVerifiedPrice && verifiedPrice != null) {
-                    val sym = shareCurrencySymbol(listing.currency)
                     Text(
-                        text = "$sym${verifiedPrice.toInt()}",
+                        text = CurrencyFormatter.format(verifiedPrice, listing.currency),
                         style = VisualCartTypography.titleSmall.copy(
                             fontWeight = FontWeight.Bold,
                             color = if (isLowest) ForestGreen else DeepInk
@@ -738,7 +732,7 @@ private fun ShareMerchantCard(
                     if (listing.originalPrice != null && listing.originalPrice > verifiedPrice) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "$sym${listing.originalPrice.toInt()}",
+                            text = CurrencyFormatter.format(listing.originalPrice, listing.currency),
                             style = VisualCartTypography.labelSmall.copy(
                                 color = MutedSlate,
                                 textDecoration = TextDecoration.LineThrough
@@ -838,7 +832,7 @@ private fun ShareSavedContent(
         Spacer(modifier = Modifier.height(6.dp))
 
         val savedSummary = if (state.price != null && state.price > 0.0) {
-            "${state.productTitle} from ${state.merchantName} (${shareCurrencySymbol(state.currency)}${state.price.toInt()})"
+            "${state.productTitle} from ${state.merchantName} (${CurrencyFormatter.format(state.price, state.currency)})"
         } else {
             "${state.productTitle} search link saved for ${state.merchantName}"
         }
@@ -889,6 +883,7 @@ private fun ShareNeedsQueryContent(
     state: ShareCaptureUiState.NeedsQuery,
     onSubmitQuery: (String) -> Unit,
     onRetryRecognition: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     var query by remember(state.suggestedQuery) { mutableStateOf(state.suggestedQuery) }
@@ -927,6 +922,20 @@ private fun ShareNeedsQueryContent(
                 lineHeight = 16.sp
             )
         )
+        if (state.showSettingsAction && !state.rateLimited) {
+            TextButton(
+                onClick = onOpenSettings,
+                modifier = Modifier.padding(top = 2.dp)
+            ) {
+                Text(
+                    text = "Configure Free AI / Backend in Settings",
+                    style = VisualCartTypography.labelSmall.copy(
+                        color = ForestGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+                )
+            }
+        }
 
         if (state.candidates.isNotEmpty()) {
             Spacer(modifier = Modifier.height(10.dp))

@@ -70,7 +70,17 @@ Under Google AI Studio's **Free Tier** terms, Google may review prompts, images,
 
 ---
 
-## 6. Verification Endpoints & Tests
+## 6. Mobile Connectivity (USB, Wi-Fi LAN, and Standalone 5G+)
+
+On a physical Android device, Visual Cart resolves free-tier `gemini-3.5-flash-lite` inference in this order:
+
+1. **Custom Backend URL (Optional in Settings -> Free-Tier AI Connection)**: e.g., `http://<PC-LAN-IP>:8000` on the same Wi-Fi network or an `https://` tunnel URL.
+2. **USB ADB Reverse (`http://localhost:8000`)**: Run `adb reverse tcp:8000 tcp:8000` while the FastAPI backend is running on port `8000`. Note that Android clears `adb reverse` if USB disconnects or re-enumerates.
+3. **Direct Google AI Studio Free-Tier Key (Optional in Settings)**: When away from USB/PC on **5G+ cellular or Wi-Fi**, save your free Google AI Studio key in **Settings -> AI Matching & Recognition Engine** (stored only in device-private `SharedPreferences`, still strictly locked to `gemini-3.5-flash-lite` and `$0` spend cap).
+
+---
+
+## 7. Verification Endpoints & Tests
 
 - Health check (verifies model allowlist & $0 policy): `GET /health`
 - Model reachability (GET without spending generation quota): `GET /api/v1/ai/model-status`

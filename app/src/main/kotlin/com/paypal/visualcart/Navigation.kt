@@ -67,6 +67,11 @@ fun MainNavigation(
                 is CaptureIntentEvent.OpenCart -> {
                     backStack.add(CartNavKey)
                 }
+                is CaptureIntentEvent.OpenSettings -> {
+                    if (backStack.lastOrNull() != SettingsNavKey) {
+                        backStack.add(SettingsNavKey)
+                    }
+                }
                 is CaptureIntentEvent.PayPalCheckoutApproved -> {
                     backStack.add(CartNavKey)
                 }
@@ -139,7 +144,7 @@ fun MainNavigation(
                 onRefineQuery = { refinedQuery ->
                     scope.launch {
                         val updated = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                            resolveManualRefinedMatch(refinedQuery, activeMatch.imageUri)
+                            resolveManualRefinedMatch(refinedQuery, activeMatch.imageUri, context)
                         }
                         currentMatchResult = updated
                     }
@@ -160,13 +165,17 @@ fun MainNavigation(
                                 merchant = item.merchantName,
                                 title = activeMatch.detectedTitle,
                                 price = if (item.hasVerifiedPrice) item.price else null,
+                                originalPrice = if (item.hasVerifiedPrice) item.originalPrice else null,
                                 currency = item.currency,
                                 productUrl = item.productUrl,
+                                imageUrl = item.imageUrl,
                                 matchType = item.matchType.name,
                                 confidence = item.confidence,
                                 availability = if (item.hasVerifiedPrice) "IN_STOCK" else "UNKNOWN",
                                 sourceType = item.sourceType.name,
                                 listingOrigin = item.listingOrigin.name,
+                                providerProductId = item.providerProductId,
+                                offerSource = item.offerSource,
                                 lastVerifiedAt = System.currentTimeMillis(),
                                 isSelectedForPurchase = SearchQueryBuilder.normalizeMerchantKey(item.merchantName) ==
                                     SearchQueryBuilder.normalizeMerchantKey(selectedItem.merchantName)
@@ -202,13 +211,17 @@ fun MainNavigation(
                                         merchant = item.merchantName,
                                         title = activeMatch.detectedTitle,
                                         price = if (item.hasVerifiedPrice) item.price else null,
+                                        originalPrice = if (item.hasVerifiedPrice) item.originalPrice else null,
                                         currency = item.currency,
                                         productUrl = item.productUrl,
+                                        imageUrl = item.imageUrl,
                                         matchType = item.matchType.name,
                                         confidence = item.confidence,
                                         availability = if (item.hasVerifiedPrice) "IN_STOCK" else "UNKNOWN",
                                         sourceType = item.sourceType.name,
                                         listingOrigin = item.listingOrigin.name,
+                                        providerProductId = item.providerProductId,
+                                        offerSource = item.offerSource,
                                         lastVerifiedAt = System.currentTimeMillis(),
                                         isSelectedForPurchase = idx == 0
                                     )

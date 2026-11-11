@@ -38,7 +38,10 @@ data class MerchantListingEntity(
     val listingOrigin: String = "VERIFIED_CATALOG_FIXTURE", // LIVE_API, DIRECT_SEARCH_URL, VERIFIED_CATALOG_FIXTURE, DEMO_DATA, NO_RESULT
     val lastVerifiedAt: Long = System.currentTimeMillis(),
     val deliveryEstimate: String? = null,
-    val isSelectedForPurchase: Boolean = true
+    val isSelectedForPurchase: Boolean = true,
+    val originalPrice: Double? = null,
+    val providerProductId: String? = null,
+    val offerSource: String? = null
 ) {
     val hasVerifiedPrice: Boolean
         get() = price != null && price > 0.0 &&

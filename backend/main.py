@@ -105,10 +105,13 @@ def read_root():
 
 @app.get("/health")
 def health_check():
+    from .channel3_client import Channel3Client
+
     return {
         "status": "healthy",
         "environment": os.getenv("PAYPAL_ENV", "sandbox"),
         "paypal_base_url": paypal_client.base_url,
+        "channel3_configured": Channel3Client().is_configured,
         "gemini_model": gemini_client.model_name,
         "free_tier_only": gemini_client.free_tier_only,
         "ai_max_cost_usd": gemini_client.max_cost_usd,
@@ -283,11 +286,138 @@ async def get_paypal_order_endpoint(order_id: str):
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"PayPal order retrieval failed: {str(e)}")
 
-@app.get("/api/merchants/search")
-async def search_merchants(q: str):
-    """Returns honest direct merchant search URLs (no fabricated prices, stock, or delivery claims).
-    Rejects raw capture filenames, timestamps, URIs, and empty noise.
-    """
-    from .gemini_client import build_merchant_search_response
+@app.post("/api/v1/payments/paypal/create-cart-order")
+@app.post("/api/paypal/create-cart-order")
+async def create_cart_paypal_order(req: Dict[str, Any], request: Request):
+    from .cart_orders import CreateCartOrderRequest, build_cart_paypal_order_payload
 
-    return build_merchant_search_response(q)
+    try:
+        cart_req = CreateCartOrderRequest(**req)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    mock_header = (
+        request.headers.get("PayPal-Mock-Response")
+        or request.headers.get("paypal-mock-response")
+        or cart_req.mock_response
+    )
+    mode = os.getenv("PAYPAL_MODE", os.getenv("PAYPAL_ENV", "sandbox")).strip().lower()
+    if mock_header and mode != "sandbox":
+        raise HTTPException(
+            status_code=400,
+            detail="PayPal-Mock-Response header is strictly forbidden when PAYPAL_MODE is not 'sandbox'",
+        )
+
+    try:
+        built = build_cart_paypal_order_payload(cart_req)
+        order = await paypal_client.create_order_from_payload(
+            order_payload=built["order_payload"],
+            total_amount=built["total"],
+            currency_code=built["currency"],
+            mock_response=mock_header,
+        )
+        approve_url = next(
+            (link.get("href") for link in order.get("links", []) if link.get("rel") == "approve"),
+            f"https://www.sandbox.paypal.com/checkoutnow?token={order.get('id')}",
+        )
+        return {
+            "status": "success",
+            "order_id": order.get("id"),
+            "order": order,
+            "approve_url": approve_url,
+            "currency": built["currency"],
+            "amount": built["total"],
+            "order_summary": {
+                "subtotal": built["subtotal"],
+                "tax": built["tax"],
+                "delivery_fee": built["delivery_fee"],
+                "total": built["total"],
+                "currency": built["currency"],
+                "item_count": built["item_count"],
+            },
+            "item_count": built["item_count"],
+            "merchant_count": built["merchant_count"],
+            "merchants": built["merchants"],
+            "is_multi_seller": built["is_multi_seller"],
+        }
+    except PayPalError as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=f"PayPal error [{e.issue}] (debug_id: {e.debug_id}): {e.description}",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PayPal cart order creation failed: {str(e)}")
+
+
+@app.get("/api/merchants/search")
+async def search_merchants(
+    q: str,
+    country: Optional[str] = None,
+    currency: Optional[str] = None,
+    include_search_links: bool = True,
+    user_id: Optional[str] = None,
+):
+    """Returns live Channel3 offers when configured alongside honest direct merchant search links."""
+    from .discovery_service import search_merchants_unified
+
+    return await search_merchants_unified(
+        q=q,
+        country=country,
+        currency=currency,
+        include_search_links=include_search_links,
+        user_id=user_id,
+    )
+
+
+@app.post("/api/v1/products/search")
+@app.post("/api/products/search")
+async def search_products_endpoint(payload: Dict[str, Any]):
+    from .discovery_service import ProductSearchRequest, discover_products
+
+    try:
+        req = ProductSearchRequest(**payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return await discover_products(req)
+
+
+@app.post("/api/v1/products/lookup")
+@app.post("/api/products/lookup")
+async def lookup_product_endpoint(payload: Dict[str, Any]):
+    from .discovery_service import ProductLookupRequest, lookup_product_by_url
+    from .page_extractor import UnsafeTargetUrlError
+
+    try:
+        req = ProductLookupRequest(**payload)
+        return await lookup_product_by_url(req)
+    except UnsafeTargetUrlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.get("/api/v1/products/{product_id}")
+@app.get("/api/products/{product_id}")
+async def refresh_product_endpoint(
+    product_id: str,
+    country: Optional[str] = None,
+    currency: Optional[str] = None,
+    user_id: Optional[str] = None,
+):
+    from .discovery_service import refresh_product_by_id
+
+    result = await refresh_product_by_id(
+        product_id=product_id,
+        country=country,
+        currency=currency,
+        user_id=user_id,
+    )
+    if not result.get("ok"):
+        code = int(result.get("status_code") or 404)
+        raise HTTPException(
+            status_code=code if 400 <= code < 600 else 502,
+            detail=result.get("error") or "Failed to refresh product",
+        )
+    return result

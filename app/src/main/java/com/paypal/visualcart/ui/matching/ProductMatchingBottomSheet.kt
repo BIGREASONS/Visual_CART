@@ -54,6 +54,7 @@ import com.paypal.visualcart.core.designsystem.DeepInk
 import com.paypal.visualcart.core.designsystem.DemoDataBadge
 import com.paypal.visualcart.core.designsystem.ForestGreen
 import com.paypal.visualcart.core.designsystem.ForestGreenLight
+import com.paypal.visualcart.core.designsystem.LiveInferenceBadge
 import com.paypal.visualcart.core.designsystem.MerchantLogoBadge
 import com.paypal.visualcart.core.designsystem.MutedSage
 import com.paypal.visualcart.core.designsystem.MutedSlate
@@ -124,7 +125,10 @@ data class MerchantListingItem(
         SourceType.DEMO
     },
     val isLowestPrice: Boolean = false,
-    val stockNote: String = if (price != null && price > 0.0) "In Stock" else "Open search results"
+    val stockNote: String = if (price != null && price > 0.0) "In Stock" else "Open search results",
+    val imageUrl: String? = null,
+    val providerProductId: String? = null,
+    val offerSource: String? = null
 ) {
     val hasVerifiedPrice: Boolean
         get() = price != null && price > 0.0 &&
@@ -487,9 +491,9 @@ fun ProductMatchingBottomSheet(
                 ?: dedupedListings.firstOrNull()
             val primaryButtonText = when {
                 bestListing != null && bestListing.hasVerifiedPrice && bestListing.price != null && comparableMerchants >= 2 ->
-                    "Add Best Price to Cart (${currencySymbolFor(bestListing.currency)}${bestListing.price.toInt()})"
+                    "Add Best Price to Cart (${com.paypal.visualcart.core.util.CurrencyFormatter.format(bestListing.price, bestListing.currency)})"
                 bestListing != null && bestListing.hasVerifiedPrice && bestListing.price != null ->
-                    "Add Offer to Cart (${currencySymbolFor(bestListing.currency)}${bestListing.price.toInt()})"
+                    "Add Offer to Cart (${com.paypal.visualcart.core.util.CurrencyFormatter.format(bestListing.price, bestListing.currency)})"
                 bestListing != null ->
                     "Save Search Links to Cart"
                 else -> "Close"
@@ -575,6 +579,9 @@ private fun MerchantListingMatchRow(
                                 )
                             )
                         }
+                    } else if (listing.listingOrigin == ListingOrigin.LIVE_API) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        LiveInferenceBadge(text = "LIVE")
                     } else if (listing.listingOrigin == ListingOrigin.DIRECT_SEARCH_URL) {
                         Spacer(modifier = Modifier.width(6.dp))
                         SpecTag(spec = "SEARCH LINK")
@@ -592,7 +599,7 @@ private fun MerchantListingMatchRow(
                     val priceVal = listing.price
                     if (listing.hasVerifiedPrice && priceVal != null) {
                         Text(
-                            text = "${currencySymbolFor(listing.currency)}${priceVal.toInt()}",
+                            text = com.paypal.visualcart.core.util.CurrencyFormatter.format(priceVal, listing.currency),
                             style = VisualCartTypography.titleLarge.copy(
                                 fontWeight = FontWeight.Bold,
                                 color = DeepInk
@@ -601,7 +608,7 @@ private fun MerchantListingMatchRow(
                         if (listing.originalPrice != null && listing.originalPrice > priceVal) {
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "${currencySymbolFor(listing.currency)}${listing.originalPrice.toInt()}",
+                                text = com.paypal.visualcart.core.util.CurrencyFormatter.format(listing.originalPrice, listing.currency),
                                 style = VisualCartTypography.bodySmall.copy(
                                     textDecoration = TextDecoration.LineThrough,
                                     color = MutedSlate
@@ -755,7 +762,8 @@ fun sonyDemoDetectedResult(): DetectedProductMatchResult {
 
 suspend fun resolveManualRefinedMatch(
     rawQuery: String,
-    existingImageUri: String?
+    existingImageUri: String?,
+    context: android.content.Context? = null
 ): DetectedProductMatchResult {
     val cleanQuery = com.paypal.visualcart.core.util.SecurityUtils.sanitizeSearchQuery(rawQuery).trim()
     val queryResult = SearchQueryBuilder.buildFromRawQuery(cleanQuery)
@@ -778,23 +786,33 @@ suspend fun resolveManualRefinedMatch(
 
     val validQuery = (queryResult as SearchQueryBuilder.Result.Valid).query
     val parsed = com.paypal.visualcart.feature.ai.LocalProductParser.parse(validQuery, imageUrl = existingImageUri)
-    val liveEngine = com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine(
+    val providers = if (context != null) {
+        com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine.liveProviders(context)
+    } else {
         com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine.defaultProviders().map {
             it.apply { isLiveMode = true }
         }
-    )
+    }
+    val liveEngine = com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine(providers)
     val discovery = liveEngine.discoverStructured(parsed)
     val allListings = liveEngine.deduplicateListings(
         discovery.exactMatches + discovery.similarAlternatives + discovery.searchLinks
     )
     val summary = com.paypal.visualcart.domain.model.MerchantComparisonSummary.fromListings(validQuery, allListings)
+    val liveCount = allListings.count { it.hasVerifiedPrice }
+    val resolvedImage = existingImageUri?.takeIf { it.isNotBlank() }
+        ?: allListings.firstOrNull { it.imageUrl.isNotBlank() }?.imageUrl
 
     return DetectedProductMatchResult(
         detectedTitle = parsed.title.ifBlank { validQuery },
         brand = parsed.brand ?: "Detected Product",
         category = parsed.category,
         specs = parsed.specifications.entries.map { "${it.key}: ${it.value}" },
-        matchReason = "Prepared ${allListings.size} store search links for \"$validQuery\".",
+        matchReason = if (liveCount > 0) {
+            "Found $liveCount live priced offer(s) across ${allListings.size} store matches for \"$validQuery\"."
+        } else {
+            "Prepared ${allListings.size} store search links for \"$validQuery\"."
+        },
         listings = allListings.map { listing ->
             MerchantListingItem(
                 merchantName = listing.merchantName,
@@ -809,12 +827,19 @@ suspend fun resolveManualRefinedMatch(
                 isLowestPrice = (summary?.hasComparableBestPrice == true) &&
                     listing.hasVerifiedPrice &&
                     listing.normalizedMerchantId == summary.lowestPriceListing?.normalizedMerchantId,
-                stockNote = if (listing.hasVerifiedPrice) "In Stock" else "Open search results"
+                stockNote = when {
+                    listing.hasVerifiedPrice && listing.availability == com.paypal.visualcart.domain.model.AvailabilityStatus.IN_STOCK -> "In Stock"
+                    listing.hasVerifiedPrice -> "Check Store"
+                    else -> "Open search results"
+                },
+                imageUrl = listing.imageUrl.takeIf { it.isNotBlank() },
+                providerProductId = listing.providerProductId,
+                offerSource = listing.offerSource
             )
         },
         isDemoFixture = false,
-        isLiveInference = false,
-        imageUri = existingImageUri,
+        isLiveInference = liveCount > 0,
+        imageUri = resolvedImage,
         isUncertain = false,
         recognitionStatus = RecognitionStatus.IDENTIFIED,
         searchQuery = validQuery,
