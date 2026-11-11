@@ -27,7 +27,7 @@ data class MerchantListingEntity(
     val savedProductId: String,
     val merchant: String,
     val title: String,
-    val price: Double,
+    val price: Double? = null,
     val currency: String = "INR",
     val productUrl: String,
     val imageUrl: String? = null,
@@ -35,10 +35,16 @@ data class MerchantListingEntity(
     val confidence: Float = 1.0f,
     val availability: String = "IN_STOCK", // IN_STOCK, LIMITED, OUT_OF_STOCK, UNKNOWN
     val sourceType: String = "DEMO", // LIVE, DEMO
+    val listingOrigin: String = "VERIFIED_CATALOG_FIXTURE", // LIVE_API, DIRECT_SEARCH_URL, VERIFIED_CATALOG_FIXTURE, DEMO_DATA, NO_RESULT
     val lastVerifiedAt: Long = System.currentTimeMillis(),
     val deliveryEstimate: String? = null,
     val isSelectedForPurchase: Boolean = true
-)
+) {
+    val hasVerifiedPrice: Boolean
+        get() = price != null && price > 0.0 &&
+            listingOrigin != "DIRECT_SEARCH_URL" &&
+            listingOrigin != "NO_RESULT"
+}
 
 /**
  * Collection entity for organizing saved products.
@@ -82,7 +88,14 @@ data class SavedProductWithListings(
         get() = listings.firstOrNull { it.isSelectedForPurchase } ?: listings.firstOrNull()
 
     val lowestPriceListing: MerchantListingEntity?
-        get() = listings.minByOrNull { it.price }
+        get() = listings
+            .filter {
+                val p = it.price
+                p != null && p > 0.0 &&
+                    it.listingOrigin != "DIRECT_SEARCH_URL" &&
+                    it.listingOrigin != "NO_RESULT"
+            }
+            .minByOrNull { it.price!! }
 
     val hasPriceDrop: Boolean
         get() {

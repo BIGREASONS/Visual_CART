@@ -57,29 +57,26 @@ class CromaAdapter(
         query: String,
         targetSpecs: Map<String, String>
     ): List<MerchantListing> {
+        val canonicalQuery = com.paypal.visualcart.feature.merchant.SearchQueryBuilder
+            .buildFromRawQuery(query)
+            .validQueryOrNull ?: return emptyList()
+
         if (isLiveMode) {
-            val live = DemoMerchantFixtures.createLiveListing(
-                merchantId = merchantId,
-                merchantName = merchantName,
-                merchantDomain = domain,
-                title = "$query (Croma Live API)",
-                price = 5799.0,
-                originalPrice = 9499.0,
-                productUrl = buildSearchUrl(query),
-                deliveryEstimate = "Standard Delivery in 24 hours",
-                sellerName = "Infiniti Retail Limited (Croma)"
-            )
-            return listOf(live)
+            return listOf(buildDirectSearchListing(canonicalQuery))
         }
 
         val listing = DemoMerchantFixtures.findDemoListing(
             merchantId = merchantId,
             merchantName = merchantName,
             merchantDomain = domain,
-            query = query,
+            query = canonicalQuery,
             searchUrlBuilder = ::buildSearchUrl
         )
 
-        return if (listing != null) listOf(listing) else emptyList()
+        return when {
+            listing != null -> listOf(listing)
+            DemoMerchantFixtures.hasCatalogMatch(canonicalQuery) -> emptyList()
+            else -> listOf(buildDirectSearchListing(canonicalQuery))
+        }
     }
 }

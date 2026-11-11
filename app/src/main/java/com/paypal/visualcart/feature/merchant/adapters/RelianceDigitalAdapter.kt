@@ -57,29 +57,26 @@ class RelianceDigitalAdapter(
         query: String,
         targetSpecs: Map<String, String>
     ): List<MerchantListing> {
+        val canonicalQuery = com.paypal.visualcart.feature.merchant.SearchQueryBuilder
+            .buildFromRawQuery(query)
+            .validQueryOrNull ?: return emptyList()
+
         if (isLiveMode) {
-            val live = DemoMerchantFixtures.createLiveListing(
-                merchantId = merchantId,
-                merchantName = merchantName,
-                merchantDomain = domain,
-                title = "$query (Reliance Digital Live API)",
-                price = 5899.0,
-                originalPrice = 9599.0,
-                productUrl = buildSearchUrl(query),
-                deliveryEstimate = "Free Store Pick-up or 2-day delivery",
-                sellerName = "Reliance Retail Limited"
-            )
-            return listOf(live)
+            return listOf(buildDirectSearchListing(canonicalQuery))
         }
 
         val listing = DemoMerchantFixtures.findDemoListing(
             merchantId = merchantId,
             merchantName = merchantName,
             merchantDomain = domain,
-            query = query,
+            query = canonicalQuery,
             searchUrlBuilder = ::buildSearchUrl
         )
 
-        return if (listing != null) listOf(listing) else emptyList()
+        return when {
+            listing != null -> listOf(listing)
+            DemoMerchantFixtures.hasCatalogMatch(canonicalQuery) -> emptyList()
+            else -> listOf(buildDirectSearchListing(canonicalQuery))
+        }
     }
 }

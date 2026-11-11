@@ -58,35 +58,66 @@ interface MerchantSearchProvider {
     fun parseProductUrl(url: String): ParsedProductMetadata?
 
     /**
-     * Constructs a standalone direct merchant search URL listing for fallback navigation.
-     * Unmistakably tagged with [ListingOrigin.DIRECT_SEARCH_URL], [SourceType.DEMO], and [MatchType.SIMILAR].
+     * Constructs a standalone direct merchant search URL listing for fallback or unconfigured live mode.
+     * Unmistakably tagged with [ListingOrigin.DIRECT_SEARCH_URL], NEVER fabricating prices, stock,
+     * discounts, or delivery promises.
      */
     fun buildDirectSearchListing(query: String): MerchantListing {
-        val cleanQuery = query.trim()
-        val searchUrl = buildSearchUrl(cleanQuery)
-        val title = "Search \"$cleanQuery\" on $merchantName"
-        val hash = abs(cleanQuery.hashCode() xor merchantId.hashCode())
+        val canonicalQuery = SearchQueryBuilder.buildFromRawQuery(query).validQueryOrNull
+            ?: return buildNoResultListing(query)
+        val searchUrl = buildSearchUrl(canonicalQuery)
+        val title = "Search \"$canonicalQuery\" on $merchantName"
+        val hash = abs(canonicalQuery.hashCode() xor merchantId.hashCode())
 
         return MerchantListing(
             id = "${merchantId}_search_${hash % 100000}",
             merchantName = merchantName,
             merchantDomain = domain,
             title = title,
-            price = 0.0,
+            price = null,
             originalPrice = null,
             currency = "INR",
             productUrl = searchUrl,
-            imageUrl = "https://via.placeholder.com/600x600.png?text=${MerchantUrlHelper.urlEncode(merchantName)}",
+            imageUrl = "",
             matchType = MatchType.SIMILAR,
-            confidence = 0.70f,
+            confidence = 0.0f,
             availability = AvailabilityStatus.UNKNOWN,
             sourceType = SourceType.DEMO,
             lastVerifiedAt = System.currentTimeMillis(),
-            deliveryEstimate = "Varies by merchant seller",
+            deliveryEstimate = null,
             rating = null,
             reviewCount = null,
             sellerName = "$merchantName Search",
             listingOrigin = ListingOrigin.DIRECT_SEARCH_URL
+        )
+    }
+
+    /**
+     * Constructs an explicit zero-result marker when no valid query or merchant offer exists.
+     */
+    fun buildNoResultListing(query: String): MerchantListing {
+        val cleanLabel = SearchQueryBuilder.sanitizeComponent(query).ifBlank { "Rejected non-product input" }
+        val hash = abs(cleanLabel.hashCode() xor merchantId.hashCode())
+        return MerchantListing(
+            id = "${merchantId}_noresult_${hash % 100000}",
+            merchantName = merchantName,
+            merchantDomain = domain,
+            title = "No verified offer for \"$cleanLabel\" on $merchantName",
+            price = null,
+            originalPrice = null,
+            currency = "INR",
+            productUrl = "",
+            imageUrl = "",
+            matchType = MatchType.SIMILAR,
+            confidence = 0.0f,
+            availability = AvailabilityStatus.UNKNOWN,
+            sourceType = SourceType.DEMO,
+            lastVerifiedAt = System.currentTimeMillis(),
+            deliveryEstimate = null,
+            rating = null,
+            reviewCount = null,
+            sellerName = merchantName,
+            listingOrigin = ListingOrigin.NO_RESULT
         )
     }
 }

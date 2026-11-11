@@ -6,6 +6,7 @@ and Multimodal Product Recognition AI Proxy.
 
 import os
 import re
+import sys
 import time
 import base64
 import uuid
@@ -260,18 +261,11 @@ def get_gemini_api_key() -> str:
 
 
 def _is_generic_image_hint(hint: Optional[str]) -> bool:
-    if not hint:
-        return True
-    cleaned = hint.strip().lower()
-    if not cleaned:
-        return True
-    if cleaned in {"shared product", "shared image", "image", "photo", "screenshot", "picture"}:
-        return True
-    if re.search(r"\.(jpe?g|png|webp|gif|bmp|heic|heif)$", cleaned):
-        return True
-    if re.match(r"^(shared[-_\s]?image(?:[-_\s()]*\d+)*|share[-_\s]?[\d_-]+|img[-_\s]?[\d_-]+|pxl[-_\s]?[\d_-]+|screenshot[-_\s]?.*|photo[-_\s]?[\d_-]+|media[-_\s]?[\d_-]+|content://.*|[\d_-]+)$", cleaned):
-        return True
-    return False
+    root_str = str(_root_dir)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from backend.gemini_client import is_generic_image_hint
+    return is_generic_image_hint(hint)
 
 
 class RecognizeProductRequest(BaseModel):
@@ -292,6 +286,19 @@ class RecognizedProductResponse(BaseModel):
     match_reason: str
     confidence: float
     source: str
+    status: str = "IDENTIFIED"
+    recognition_source: str = "FALLBACK"
+    product_name: Optional[str] = None
+    model: Optional[str] = None
+    colour: Optional[str] = None
+    search_query: str = ""
+    model_name: Optional[str] = None
+    candidates: List[Dict[str, Any]] = []
+    request_id: Optional[str] = None
+    image_bytes_received: Optional[int] = None
+    image_dimensions: Optional[str] = None
+    detected_mime_type: Optional[str] = None
+    diagnostic_note: Optional[str] = None
 
 
 # ============================================================================
@@ -949,141 +956,62 @@ async def mock_approve_page(order_id: str, return_url: str = "paypalvisualcart:/
 @app.post("/api/v1/ai/recognize-product", response_model=RecognizedProductResponse)
 async def recognize_product(req: RecognizeProductRequest):
     """
-    Proxies product visual recognition and text understanding to Google Gemini 1.5 Flash.
-    If GEMINI_API_KEY is not configured, provides deterministic parsing of hint_text.
+    Proxies multimodal product visual recognition and text understanding to Google Gemini
+    (active models: gemini-3.8-flash -> gemini-3.5-flash-lite fallback) using validated
+    image binary magic bytes and a strict anti-hallucination prompt/schema.
     """
-    # 1. If Gemini API key is configured, invoke Gemini multimodal model (gemini-2.5-flash)
-    gemini_api_key = get_gemini_api_key()
-    effective_hint = (req.hint_text or req.text or req.context_text or "").strip()
+    root_str = str(_root_dir)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from backend.gemini_client import GeminiClient
 
-    if gemini_api_key:
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={gemini_api_key}"
-
-        prompt = (
-            "You are an e-commerce product recognition engine for PayPal Visual Cart. "
-            "Analyze the given image and/or text context and extract the canonical product details. "
-            "Return strictly a JSON object with keys: title, brand, category, estimated_price (number), "
-            "specifications (object mapping key to value), and match_reason."
-        )
-
-        parts = [{"text": prompt}]
-        if effective_hint and not _is_generic_image_hint(effective_hint):
-            parts.append({"text": f"Context/Text: {effective_hint}"})
-
-        if req.image_base64:
-            parts.append({
-                "inline_data": {
-                    "mime_type": req.mime_type,
-                    "data": req.image_base64,
-                }
-            })
-
-        payload = {"contents": [{"parts": parts}]}
-
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            try:
-                res = await client.post(gemini_url, json=payload)
-                res.raise_for_status()
-                gemini_data = res.json()
-                candidate_text = (
-                    gemini_data.get("candidates", [{}])[0]
-                    .get("content", {})
-                    .get("parts", [{}])[0]
-                    .get("text", "")
-                )
-
-                # Extract JSON if enclosed in markdown code fences
-                cleaned_json = candidate_text.strip()
-                if cleaned_json.startswith("```json"):
-                    cleaned_json = cleaned_json[7:]
-                if cleaned_json.startswith("```"):
-                    cleaned_json = cleaned_json[3:]
-                if cleaned_json.endswith("```"):
-                    cleaned_json = cleaned_json[:-3]
-                cleaned_json = cleaned_json.strip()
-
-                import json
-                parsed = json.loads(cleaned_json)
-                return RecognizedProductResponse(
-                    title=parsed.get("title", "Recognized Product"),
-                    brand=parsed.get("brand"),
-                    category=parsed.get("category", "General"),
-                    estimated_price=parsed.get("estimated_price"),
-                    currency=DEFAULT_CURRENCY,
-                    specifications=parsed.get("specifications", {}),
-                    match_reason=parsed.get("match_reason", "Identified via Gemini 2.5 Flash multimodal vision."),
-                    confidence=0.96,
-                    source="gemini_cloud",
-                )
-            except Exception as e:
-                logger.warning(f"Gemini API request failed ({str(e)}), falling back to local heuristic parser.")
-
-    # 2. Do not hallucinate a fake Samsung SSD or generic filename when an image is shared without Gemini Vision
-    if req.image_base64 and _is_generic_image_hint(effective_hint):
-        reason = (
-            "Visual AI image recognition did not identify this image. Please enter the product name manually."
-            if gemini_api_key
-            else "Visual AI requires GEMINI_API_KEY in backend .env. Please enter the product name manually."
-        )
-        return RecognizedProductResponse(
-            title="Unidentified Product",
-            brand="",
-            category="Unidentified",
-            estimated_price=None,
-            currency=DEFAULT_CURRENCY,
-            specifications={},
-            match_reason=reason,
-            confidence=0.1,
-            source="needs_gemini_key" if not gemini_api_key else "vision_unidentified",
-        )
-
-    # 3. Local heuristic fallback parser
-    text = (effective_hint or "Samsung 990 EVO 1TB NVMe SSD").strip()
-    brand = None
-    category = "General"
-    specs = {}
-
-    lower = text.lower()
-    if "samsung" in lower:
-        brand = "Samsung"
-        category = "Electronics"
-        specs["Brand"] = "Samsung"
-    elif "crucial" in lower:
-        brand = "Crucial"
-        category = "Electronics"
-        specs["Brand"] = "Crucial"
-    elif "sony" in lower:
-        brand = "Sony"
-        category = "Audio"
-        specs["Brand"] = "Sony"
-    elif "apple" in lower or "iphone" in lower:
-        brand = "Apple"
-        category = "Smartphones"
-        specs["Brand"] = "Apple"
-
-    if "1tb" in lower:
-        specs["Capacity"] = "1TB"
-    elif "2tb" in lower:
-        specs["Capacity"] = "2TB"
-    elif "500gb" in lower:
-        specs["Capacity"] = "500GB"
-
-    if "nvme" in lower or "ssd" in lower:
-        specs["Form Factor"] = "M.2 2280 NVMe"
-
-    fallback_price = 59.99 if DEFAULT_CURRENCY == "USD" else (5999.0 if DEFAULT_CURRENCY == "INR" else 49.99)
-    return RecognizedProductResponse(
-        title=text,
-        brand=brand,
-        category=category,
-        estimated_price=fallback_price,
-        currency=DEFAULT_CURRENCY,
-        specifications=specs,
-        match_reason="Parsed using smart local product parser.",
-        confidence=0.92,
-        source="local_heuristic",
+    client = GeminiClient(
+        api_key=get_gemini_api_key(),
+        model_name=(os.getenv("GEMINI_MODEL", "").strip() or None),
     )
+    effective_hint = (req.hint_text or req.text or req.context_text or "").strip()
+    res = await client.understand_product(
+        text=effective_hint or None,
+        hint_text=req.hint_text,
+        image_base64=req.image_base64,
+        mime_type=req.mime_type,
+        currency=DEFAULT_CURRENCY,
+    )
+    return RecognizedProductResponse(
+        title=res.get("title") or "Unidentified Product",
+        brand=res.get("brand"),
+        category=res.get("category") or "Unidentified",
+        estimated_price=res.get("estimated_price"),
+        currency=res.get("currency") or DEFAULT_CURRENCY,
+        specifications=res.get("specifications") or {},
+        match_reason=res.get("match_reason") or "",
+        confidence=float(res.get("confidence") or 0.0),
+        source=res.get("source") or "fallback",
+        status=res.get("status") or "UNIDENTIFIED",
+        recognition_source=res.get("recognition_source") or "FALLBACK",
+        product_name=res.get("product_name"),
+        model=res.get("model"),
+        colour=res.get("colour"),
+        search_query=res.get("search_query") or "",
+        model_name=res.get("model_name"),
+        candidates=res.get("candidates") or [],
+        request_id=res.get("request_id"),
+        image_bytes_received=res.get("image_bytes_received"),
+        image_dimensions=res.get("image_dimensions"),
+        detected_mime_type=res.get("detected_mime_type"),
+        diagnostic_note=res.get("diagnostic_note"),
+    )
+
+
+@app.get("/api/merchants/search")
+async def search_merchants(q: str):
+    """Returns honest direct merchant search URLs (no fabricated prices, stock, or delivery claims)."""
+    root_str = str(_root_dir)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    from backend.gemini_client import build_merchant_search_response
+
+    return build_merchant_search_response(q)
 
 
 @app.get("/health")
@@ -1095,6 +1023,7 @@ async def health_check():
         "has_paypal_credentials": has_live_paypal_credentials(),
         "has_gemini_api_key": bool(get_gemini_api_key()),
         "mode": PAYPAL_MODE,
+        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
         "timestamp": time.time(),
     }
 

@@ -152,6 +152,16 @@ class PayPalCheckoutCoordinator(
     fun startCheckout(context: Any? = null, listing: MerchantListing) {
         activeListing = listing
         lastOrderReadyState = null
+        val verifiedPrice = listing.price
+        if (!listing.hasVerifiedPrice || verifiedPrice == null || verifiedPrice <= 0.0 || !verifiedPrice.isFinite()) {
+            _uiState.value = PayPalCheckoutUiState.Failure(
+                errorMessage = "Price is unavailable for search links (${listing.merchantName}). Open the merchant page to verify live pricing before PayPal checkout.",
+                errorCode = "ERR_PRICE_UNAVAILABLE",
+                canRetry = false,
+                originalListing = listing
+            )
+            return
+        }
         _uiState.value = PayPalCheckoutUiState.Initializing(
             productTitle = listing.title,
             merchantName = listing.merchantName
@@ -181,7 +191,7 @@ class PayPalCheckoutCoordinator(
                     }
 
                     val summary = orderResult.orderSummary
-                    val subtotal = summary?.subtotal ?: listing.price
+                    val subtotal = summary?.subtotal ?: verifiedPrice
                     val tax = summary?.gst ?: (subtotal * 0.18)
                     val delivery = summary?.deliveryFee ?: 0.0
                     val total = summary?.total ?: (subtotal + tax + delivery)
@@ -244,10 +254,20 @@ class PayPalCheckoutCoordinator(
         listing: MerchantListing,
         usdRate: Double = DEFAULT_INR_TO_USD_RATE
     ) {
+        val verifiedPrice = listing.price
+        if (!listing.hasVerifiedPrice || verifiedPrice == null || verifiedPrice <= 0.0 || !verifiedPrice.isFinite()) {
+            _uiState.value = PayPalCheckoutUiState.Failure(
+                errorMessage = "Price is unavailable for search links (${listing.merchantName}). Open the merchant page to verify live pricing.",
+                errorCode = "ERR_PRICE_UNAVAILABLE",
+                canRetry = false,
+                originalListing = listing
+            )
+            return
+        }
         val convertedPrice = if (listing.currency.equals("USD", ignoreCase = true)) {
-            listing.price
+            verifiedPrice
         } else {
-            max(0.01, Math.round(listing.price * usdRate * 100.0) / 100.0)
+            max(0.01, Math.round(verifiedPrice * usdRate * 100.0) / 100.0)
         }
         val convertedOriginal = listing.originalPrice?.let {
             if (listing.currency.equals("USD", ignoreCase = true)) it

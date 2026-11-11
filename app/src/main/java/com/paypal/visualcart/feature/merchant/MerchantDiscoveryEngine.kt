@@ -38,14 +38,14 @@ class MerchantDiscoveryEngine(
         query: String,
         targetSpecs: Map<String, String> = emptyMap()
     ): List<MerchantListing> = withContext(Dispatchers.IO) {
-        val trimmedQuery = query.trim()
-        if (trimmedQuery.isBlank()) return@withContext emptyList()
+        val canonicalQuery = SearchQueryBuilder.buildFromRawQuery(query).validQueryOrNull
+            ?: return@withContext emptyList()
 
         coroutineScope {
             val deferreds = providers.map { provider ->
                 async {
                     try {
-                        provider.search(trimmedQuery, targetSpecs)
+                        provider.search(canonicalQuery, targetSpecs)
                     } catch (_: Exception) {
                         emptyList()
                     }
@@ -53,7 +53,7 @@ class MerchantDiscoveryEngine(
             }
 
             val flattened = deferreds.awaitAll().flatten()
-            sortListings(flattened)
+            deduplicateListings(flattened)
         }
     }
 
@@ -97,24 +97,55 @@ class MerchantDiscoveryEngine(
      * 4. Highest match confidence
      */
     fun sortListings(listings: List<MerchantListing>): List<MerchantListing> {
-        return listings.sortedWith(
-            compareBy<MerchantListing> { listing ->
-                when (listing.matchType) {
-                    MatchType.EXACT -> 0
-                    MatchType.LIKELY -> 1
-                    MatchType.SIMILAR -> 2
-                }
+        return MerchantComparisonSummary.sortCanonicalListings(listings)
+    }
+
+    fun deduplicateListings(listings: List<MerchantListing>): List<MerchantListing> {
+        val sorted = sortListings(listings)
+        return sorted.distinctBy { listing ->
+            "${listing.normalizedMerchantId}::${SearchQueryBuilder.normalizeProductIdentityKey(listing.title)}"
+        }
+    }
+
+    suspend fun discoverStructured(
+        product: com.paypal.visualcart.domain.model.RecognizedProduct
+    ): com.paypal.visualcart.domain.model.MerchantDiscoveryResult = withContext(Dispatchers.IO) {
+        val queryResult = SearchQueryBuilder.build(
+            SearchQueryBuilder.Input.fromRecognizedProduct(product)
+        )
+        val canonicalQuery = when (queryResult) {
+            is SearchQueryBuilder.Result.Valid -> queryResult.query
+            is SearchQueryBuilder.Result.Rejected -> {
+                return@withContext com.paypal.visualcart.domain.model.MerchantDiscoveryResult(
+                    canonicalQuery = null,
+                    rejectedReason = queryResult.reason
+                )
             }
-                .thenBy {
-                    when (it.availability) {
-                        AvailabilityStatus.IN_STOCK -> 0
-                        AvailabilityStatus.LIMITED -> 1
-                        AvailabilityStatus.UNKNOWN -> 2
-                        AvailabilityStatus.OUT_OF_STOCK -> 3
-                    }
-                }
-                .thenBy { it.price }
-                .thenByDescending { it.confidence }
+        }
+
+        val allListings = searchAll(canonicalQuery, product.specifications)
+        val exactMatches = allListings.filter {
+            it.hasVerifiedPrice && (it.matchType == MatchType.EXACT || it.matchType == MatchType.LIKELY)
+        }
+        val similarAlternatives = allListings.filter {
+            it.hasVerifiedPrice && it.matchType == MatchType.SIMILAR
+        }
+        val searchLinks = allListings.filter {
+            it.listingOrigin == com.paypal.visualcart.domain.model.ListingOrigin.DIRECT_SEARCH_URL
+        }
+        val unavailable = allListings.filter {
+            it.listingOrigin == com.paypal.visualcart.domain.model.ListingOrigin.NO_RESULT ||
+                it.availability == AvailabilityStatus.OUT_OF_STOCK
+        }
+        val summary = MerchantComparisonSummary.fromListings(canonicalQuery, exactMatches + similarAlternatives + searchLinks)
+        com.paypal.visualcart.domain.model.MerchantDiscoveryResult(
+            canonicalQuery = canonicalQuery,
+            rejectedReason = null,
+            exactMatches = exactMatches,
+            similarAlternatives = similarAlternatives,
+            searchLinks = searchLinks,
+            unavailableMerchants = unavailable,
+            comparisonSummary = summary
         )
     }
 

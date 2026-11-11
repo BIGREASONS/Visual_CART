@@ -109,10 +109,11 @@ open class PayPalSandboxPaymentAdapter(
         idempotencyKey: String? = null
     ): CheckoutResult {
         // Price validation to prevent tampering (negative, NaN, infinite, or zero price)
-        if (listing.price <= 0.0 || listing.price.isNaN() || listing.price.isInfinite()) {
+        val verifiedPrice = listing.price
+        if (!listing.hasVerifiedPrice || verifiedPrice == null || verifiedPrice <= 0.0 || verifiedPrice.isNaN() || verifiedPrice.isInfinite()) {
             return CheckoutResult.Error(
-                message = "Invalid listing price: ${listing.price}. Price must be positive and finite.",
-                errorCode = "ERR_INVALID_PRICE"
+                message = "Price is unavailable for search links (${listing.merchantName}). Open the merchant page to verify live pricing.",
+                errorCode = "ERR_PRICE_UNAVAILABLE"
             )
         }
 
@@ -265,6 +266,12 @@ open class PayPalSandboxPaymentAdapter(
         context: Any?,
         listing: MerchantListing
     ): CheckoutResult {
+        if (!listing.hasVerifiedPrice || (listing.price ?: 0.0) <= 0.0) {
+            return CheckoutResult.Error(
+                message = "Price is unavailable for search links. Open the merchant page to verify live pricing.",
+                errorCode = "ERR_PRICE_UNAVAILABLE"
+            )
+        }
         if (backendClient.isBackendAvailable()) {
             val orderResult = backendClient.createOrder(
                 listing = listing,

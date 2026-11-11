@@ -156,9 +156,8 @@ object ProductMatchingEngine {
             score += 0.25f
             matchedAttributes.add("brand: $targetBrand")
         } else {
-            // Unspecified brand
+            // Unspecified brand: do not award false positive score
             brandMatch = true
-            score += 0.10f
             missingAttributes.add("brand: not specified")
         }
 
@@ -238,7 +237,7 @@ object ProductMatchingEngine {
         val missing = mutableListOf<String>()
 
         if (targetSpecs.isEmpty() && candidateSpecs.isEmpty()) {
-            return SpecComparisonResult(0.20f, matched, differing, missing)
+            return SpecComparisonResult(0.0f, matched, differing, missing)
         }
 
         val allKeys = candidateSpecs.keys + targetSpecs.keys
@@ -267,7 +266,7 @@ object ProductMatchingEngine {
             val ratio = matchedCount.toFloat() / totalEvaluated.toFloat()
             ratio * 0.30f
         } else {
-            0.15f
+            0.0f
         }
 
         return SpecComparisonResult(specScore, matched, differing, missing)

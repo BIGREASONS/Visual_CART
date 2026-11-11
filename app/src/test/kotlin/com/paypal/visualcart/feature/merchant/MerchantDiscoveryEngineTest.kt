@@ -1,10 +1,13 @@
 package com.paypal.visualcart.feature.merchant
 
+import com.paypal.visualcart.domain.model.ListingOrigin
 import com.paypal.visualcart.domain.model.MatchType
 import com.paypal.visualcart.domain.model.SourceType
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -26,13 +29,13 @@ class MerchantDiscoveryEngineTest {
 
             // Check lowest price first
             assertEquals("flipkart", listings[0].id.substringBefore("_"))
-            assertEquals(5499.0, listings[0].price, 0.01)
+            assertEquals(5499.0, listings[0].price ?: 0.0, 0.01)
 
             // Check prices are ascending for exact matches
             for (i in 0 until listings.size - 1) {
                 assertTrue(
                     "Expected listing ${listings[i].price} <= ${listings[i + 1].price}",
-                    listings[i].price <= listings[i + 1].price
+                    (listings[i].price ?: Double.MAX_VALUE) <= (listings[i + 1].price ?: Double.MAX_VALUE)
                 )
             }
         }
@@ -46,11 +49,12 @@ class MerchantDiscoveryEngineTest {
             assertNotNull(summary)
             summary?.let {
                 assertEquals("Samsung 990 EVO", it.canonicalTitle)
-                assertEquals("flipkart", it.lowestPriceListing.id.substringBefore("_"))
-                assertEquals(5499.0, it.lowestPrice, 0.01)
-                assertEquals(6199.0, it.highestPrice, 0.01)
+                assertEquals("flipkart", it.lowestPriceListing?.id?.substringBefore("_"))
+                assertEquals(5499.0, it.lowestPrice ?: 0.0, 0.01)
+                assertEquals(6199.0, it.highestPrice ?: 0.0, 0.01)
                 assertEquals(700.0, it.maxSavings, 0.01)
                 assertTrue(it.hasDemoData)
+                assertTrue(it.hasComparableBestPrice)
             }
         }
     }
@@ -77,15 +81,53 @@ class MerchantDiscoveryEngineTest {
     }
 
     @Test
-    fun testArbitraryQuerySynthesis() {
+    fun testArbitraryQueryReturnsHonestSearchLinksWithoutFakePrices() {
         runBlocking {
-            // Query that is not in the hardcoded catalog
+            // Query that is not in the hardcoded demo catalog must NOT invent synthetic INR prices
             val listings = engine.searchAll("Ergonomic Mechanical Keyboard")
 
             assertEquals(6, listings.size)
-            assertTrue(listings.all { it.sourceType == SourceType.DEMO })
-            assertTrue(listings.all { it.price > 0.0 })
-            assertTrue(listings.all { it.productUrl.isNotBlank() })
+            assertTrue(listings.all { it.listingOrigin == ListingOrigin.DIRECT_SEARCH_URL })
+            assertTrue(listings.all { it.price == null && !it.hasVerifiedPrice })
+            assertTrue(listings.all { it.productUrl.isNotBlank() && !it.productUrl.contains("shared", ignoreCase = true) })
+
+            val summary = engine.comparePrices("Ergonomic Mechanical Keyboard")
+            assertNotNull(summary)
+            assertNull(summary?.lowestPrice)
+            assertFalse(summary?.hasComparableBestPrice == true)
+            assertEquals(0.0, summary?.maxSavings ?: -1.0, 0.001)
+        }
+    }
+
+    @Test
+    fun testLiveModeNeverContaminatesWithDemoFixturesAndRejectsCaptureFilenames() {
+        runBlocking {
+            val liveEngine = MerchantDiscoveryEngine(
+                MerchantDiscoveryEngine.defaultProviders().map { provider ->
+                    provider.apply { isLiveMode = true }
+                }
+            )
+
+            // Even for a product in DemoMerchantFixtures, live mode returns real store search links (no fake demo price)
+            val liveListings = liveEngine.searchAll("Samsung 990 EVO 1TB SSD")
+            assertTrue(liveListings.isNotEmpty())
+            assertTrue(liveListings.all { it.listingOrigin == ListingOrigin.DIRECT_SEARCH_URL })
+            assertTrue(liveListings.all { it.price == null && !it.hasVerifiedPrice })
+
+            // Capture filename/timestamp noise must be blocked before reaching any store search URL
+            val noiseProduct = com.paypal.visualcart.domain.model.RecognizedProduct(
+                id = "noise-1",
+                title = "capture 1794369896240 4816",
+                brand = null,
+                category = "Unidentified",
+                confidence = 0.1f,
+                searchQuery = "capture 1794369896240 4816"
+            )
+            val noiseResult = liveEngine.discoverStructured(noiseProduct)
+            assertNotNull(noiseResult.rejectedReason)
+            assertNull(noiseResult.canonicalQuery)
+            assertTrue(noiseResult.exactMatches.isEmpty())
+            assertTrue(noiseResult.searchLinks.isEmpty())
         }
     }
 }

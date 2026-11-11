@@ -1,7 +1,9 @@
 package com.paypal.visualcart.domain.model
 
+import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
 import com.paypal.visualcart.feature.merchant.ShippingEstimate
 import com.paypal.visualcart.feature.merchant.ShippingEstimator
+import java.util.Locale
 
 /**
  * Match type indicating how closely a merchant listing corresponds to the user's target query or scanned product.
@@ -31,23 +33,27 @@ enum class SourceType {
 }
 
 /**
- * Detailed origin / data source category of a merchant listing.
- * Distinguishes between live merchant API responses, direct search URL navigation links,
- * and verified demo catalog fixtures.
+ * Detailed provenance of a merchant listing.
  */
 enum class ListingOrigin {
-    /** Real-time response from live merchant API / scrape gateway */
+    /** Real-time response from a live merchant API / scrape gateway */
     LIVE_API,
 
-    /** Direct merchant search URL generated for fallback navigation */
+    /** Direct clickable merchant search URL; carries NO price, MRP, stock, or delivery claim */
     DIRECT_SEARCH_URL,
 
-    /** Verified pre-indexed benchmark fixture with validated specs and pricing */
-    VERIFIED_CATALOG_FIXTURE
+    /** Verified pre-indexed benchmark catalog fixture with validated pricing */
+    VERIFIED_CATALOG_FIXTURE,
+
+    /** Illustrative UI showcase / preview demo entry */
+    DEMO_DATA,
+
+    /** Merchant returned no verified offer for the canonical product */
+    NO_RESULT
 }
 
 /**
- * Represents a single product listing discovered across supported e-commerce merchants.
+ * Represents a single product listing or store search link across supported e-commerce merchants.
  */
 data class MerchantListing(
     val id: String,
@@ -55,7 +61,7 @@ data class MerchantListing(
     val merchantLogoRes: Int? = null,
     val merchantDomain: String,
     val title: String,
-    val price: Double,
+    val price: Double?,
     val originalPrice: Double? = null,
     val currency: String = "INR",
     val productUrl: String,
@@ -69,27 +75,82 @@ data class MerchantListing(
     val rating: Float? = null,
     val reviewCount: Int? = null,
     val sellerName: String? = null,
-    val listingOrigin: ListingOrigin = if (sourceType == SourceType.LIVE) {
-        ListingOrigin.LIVE_API
-    } else if (productUrl.contains("/s?k=") || productUrl.contains("/search") || id.contains("_syn_") || id.contains("_search_")) {
-        ListingOrigin.DIRECT_SEARCH_URL
-    } else {
-        ListingOrigin.VERIFIED_CATALOG_FIXTURE
-    }
+    val listingOrigin: ListingOrigin = when {
+        sourceType == SourceType.LIVE -> ListingOrigin.LIVE_API
+        price == null && productUrl.isBlank() -> ListingOrigin.NO_RESULT
+        price == null -> ListingOrigin.DIRECT_SEARCH_URL
+        id.contains("_demo_", ignoreCase = true) -> ListingOrigin.DEMO_DATA
+        else -> ListingOrigin.VERIFIED_CATALOG_FIXTURE
+    },
+    val isReferencePriceVerified: Boolean = false
 ) {
+    init {
+        when (listingOrigin) {
+            ListingOrigin.DIRECT_SEARCH_URL, ListingOrigin.NO_RESULT -> {
+                require(price == null) {
+                    "Listings with origin $listingOrigin must not carry a fabricated price (found $price)."
+                }
+                require(originalPrice == null) {
+                    "Listings with origin $listingOrigin must not carry a fabricated originalPrice."
+                }
+                require(availability == AvailabilityStatus.UNKNOWN) {
+                    "Listings with origin $listingOrigin must use AvailabilityStatus.UNKNOWN."
+                }
+                require(deliveryEstimate == null) {
+                    "Listings with origin $listingOrigin must not claim delivery estimates."
+                }
+                require(rating == null && reviewCount == null) {
+                    "Listings with origin $listingOrigin must not invent ratings or reviews."
+                }
+            }
+            ListingOrigin.LIVE_API -> {
+                require(sourceType == SourceType.LIVE) {
+                    "LIVE_API listing must use SourceType.LIVE."
+                }
+                require(price != null && price > 0.0 && price.isFinite()) {
+                    "LIVE_API listing requires positive finite price."
+                }
+            }
+            ListingOrigin.VERIFIED_CATALOG_FIXTURE, ListingOrigin.DEMO_DATA -> {
+                require(sourceType == SourceType.DEMO) {
+                    "$listingOrigin listing must use SourceType.DEMO."
+                }
+                require(price != null && price > 0.0 && price.isFinite()) {
+                    "$listingOrigin listing requires positive finite price."
+                }
+            }
+        }
+    }
+
+    val normalizedMerchantId: String
+        get() = SearchQueryBuilder.normalizeMerchantKey(
+            merchantDomain.ifBlank { merchantName }
+        )
+
+    val hasVerifiedPrice: Boolean
+        get() = price != null &&
+            price > 0.0 &&
+            price.isFinite() &&
+            listingOrigin != ListingOrigin.DIRECT_SEARCH_URL &&
+            listingOrigin != ListingOrigin.NO_RESULT
+
     val discountPercentage: Int?
-        get() = if (originalPrice != null && originalPrice > price) {
-            (((originalPrice - price) / originalPrice) * 100).toInt()
-        } else null
+        get() {
+            val currentPrice = price
+            if (!hasVerifiedPrice || currentPrice == null || originalPrice == null || originalPrice <= currentPrice) {
+                return null
+            }
+            return (((originalPrice - currentPrice) / originalPrice) * 100).toInt()
+        }
 
     val isDemo: Boolean
         get() = sourceType == SourceType.DEMO
 
     val isLive: Boolean
-        get() = sourceType == SourceType.LIVE
+        get() = sourceType == SourceType.LIVE && listingOrigin == ListingOrigin.LIVE_API
 
     val isLiveApi: Boolean
-        get() = listingOrigin == ListingOrigin.LIVE_API || sourceType == SourceType.LIVE
+        get() = listingOrigin == ListingOrigin.LIVE_API
 
     val isDirectSearchUrl: Boolean
         get() = listingOrigin == ListingOrigin.DIRECT_SEARCH_URL
@@ -97,28 +158,38 @@ data class MerchantListing(
     val isVerifiedCatalogFixture: Boolean
         get() = listingOrigin == ListingOrigin.VERIFIED_CATALOG_FIXTURE
 
+    val isDemoData: Boolean
+        get() = listingOrigin == ListingOrigin.DEMO_DATA
+
+    val isNoResult: Boolean
+        get() = listingOrigin == ListingOrigin.NO_RESULT
+
     val originLabel: String
         get() = when (listingOrigin) {
             ListingOrigin.LIVE_API -> "LIVE API"
             ListingOrigin.DIRECT_SEARCH_URL -> "DIRECT SEARCH"
             ListingOrigin.VERIFIED_CATALOG_FIXTURE -> "VERIFIED FIXTURE"
+            ListingOrigin.DEMO_DATA -> "DEMO DATA"
+            ListingOrigin.NO_RESULT -> "NO RESULT"
         }
 
     /**
      * Unmistakable provenance tag combining source type, match quality, and data origin.
-     * E.g. "[DEMO | EXACT | VERIFIED FIXTURE]" or "[LIVE | EXACT | LIVE API]".
      */
     val provenanceTag: String
         get() = "[${sourceType.name} | ${matchType.name} | $originLabel]"
 
     /**
      * Structured delivery speed, free shipping eligibility, and estimated days.
+     * Returns null when pricing or shipping evidence is absent (such as search links).
      */
-    val parsedShippingEstimate: ShippingEstimate
-        get() = ShippingEstimator.estimate(
+    val parsedShippingEstimate: ShippingEstimate?
+        get() = ShippingEstimator.estimateOrNull(
             deliveryText = deliveryEstimate,
-            merchantId = id.substringBefore("_"),
-            price = price
+            merchantId = normalizedMerchantId,
+            price = price,
+            currency = currency,
+            listingOrigin = listingOrigin
         )
 }
 
@@ -127,54 +198,152 @@ data class MerchantListing(
  */
 data class MerchantComparisonSummary(
     val canonicalTitle: String,
-    val lowestPriceListing: MerchantListing,
-    val listings: List<MerchantListing>
+    val lowestPriceListing: MerchantListing?,
+    val listings: List<MerchantListing>,
+    val comparableCurrency: String? = lowestPriceListing?.currency,
+    val comparableMerchantCount: Int = 0,
+    val hasVerifiedReferenceSavings: Boolean = false
 ) {
-    val highestPrice: Double
-        get() = listings.maxOfOrNull { it.price } ?: lowestPriceListing.price
+    val pricedListings: List<MerchantListing>
+        get() = listings.filter { it.hasVerifiedPrice && it.availability != AvailabilityStatus.OUT_OF_STOCK }
 
-    val lowestPrice: Double
-        get() = lowestPriceListing.price
+    val comparablePricedListings: List<MerchantListing>
+        get() {
+            val baseCurrency = comparableCurrency ?: return emptyList()
+            val validCurrencyPool = pricedListings.filter {
+                it.currency.equals(baseCurrency, ignoreCase = true)
+            }
+            return selectComparableTierPool(validCurrencyPool)
+        }
+
+    val hasComparableBestPrice: Boolean
+        get() = lowestPriceListing != null && comparableMerchantCount >= 2
+
+    val highestPrice: Double?
+        get() {
+            val pool = comparablePricedListings
+            return if (pool.size >= 2) pool.mapNotNull { it.price }.maxOrNull() else lowestPriceListing?.price
+        }
+
+    val lowestPrice: Double?
+        get() = lowestPriceListing?.price
 
     val maxSavings: Double
-        get() = (highestPrice - lowestPrice).coerceAtLeast(0.0)
+        get() {
+            if (!hasComparableBestPrice) return 0.0
+            val low = lowestPrice ?: return 0.0
+            val high = highestPrice ?: return 0.0
+            return (high - low).coerceAtLeast(0.0)
+        }
+
+    val verifiedSavings: Double?
+        get() {
+            if (hasComparableBestPrice && maxSavings > 0.0) return maxSavings
+            val best = lowestPriceListing ?: return null
+            if (best.isReferencePriceVerified && best.originalPrice != null && best.price != null && best.originalPrice > best.price) {
+                return best.originalPrice - best.price
+            }
+            return null
+        }
 
     val exactMatchCount: Int
-        get() = listings.count { it.matchType == MatchType.EXACT }
+        get() = listings.count { it.matchType == MatchType.EXACT && it.hasVerifiedPrice }
 
     val hasDemoData: Boolean
         get() = listings.any { it.sourceType == SourceType.DEMO }
 
     val hasLiveMatches: Boolean
-        get() = listings.any { it.sourceType == SourceType.LIVE }
+        get() = listings.any { it.isLiveApi }
+
+    val searchLinksOnly: Boolean
+        get() = listings.isNotEmpty() && pricedListings.isEmpty()
 
     companion object {
         fun fromListings(canonicalTitle: String, listings: List<MerchantListing>): MerchantComparisonSummary? {
             if (listings.isEmpty()) return null
 
-            // Prioritize lowest price within best match tier: EXACT first, then LIKELY, then SIMILAR
-            val exactListings = listings.filter { it.matchType == MatchType.EXACT }
-            val likelyListings = listings.filter { it.matchType == MatchType.LIKELY }
-            val candidatePool = when {
-                exactListings.isNotEmpty() -> exactListings
-                likelyListings.isNotEmpty() -> likelyListings
-                else -> listings
+            val sortedListings = sortCanonicalListings(listings)
+            val eligiblePriced = sortedListings.filter {
+                it.hasVerifiedPrice && it.availability != AvailabilityStatus.OUT_OF_STOCK
             }
-            val lowest = candidatePool.minByOrNull { it.price } ?: listings.minByOrNull { it.price } ?: return null
 
-            // Robust multi-criteria sort:
-            // 1. Match type hierarchy (EXACT -> LIKELY -> SIMILAR)
-            // 2. Availability (IN_STOCK -> LIMITED -> UNKNOWN -> OUT_OF_STOCK)
-            // 3. Lowest price ascending
-            // 4. Highest confidence descending
-            val sortedListings = listings.sortedWith(
-                compareBy<MerchantListing> {
-                    when (it.matchType) {
-                        MatchType.EXACT -> 0
-                        MatchType.LIKELY -> 1
-                        MatchType.SIMILAR -> 2
+            if (eligiblePriced.isEmpty()) {
+                return MerchantComparisonSummary(
+                    canonicalTitle = canonicalTitle,
+                    lowestPriceListing = null,
+                    listings = sortedListings,
+                    comparableCurrency = null,
+                    comparableMerchantCount = 0,
+                    hasVerifiedReferenceSavings = false
+                )
+            }
+
+            // Pick comparable match tier (prefer >=2 EXACT merchants, else EXACT+LIKELY; never let cheap SIMILAR accessories skew exact comparisons)
+            val tierPool = selectComparableTierPool(eligiblePriced)
+
+            // Restrict comparison to a single consistent currency so USD & INR are never subtracted
+            val dominantCurrency = tierPool
+                .groupBy { it.currency.uppercase(Locale.ROOT) }
+                .maxByOrNull { it.value.size }
+                ?.key ?: "INR"
+
+            val sameCurrencyPool = tierPool.filter { it.currency.equals(dominantCurrency, ignoreCase = true) }
+            val lowest = sameCurrencyPool.minByOrNull { it.price ?: Double.MAX_VALUE }
+
+            val distinctComparableMerchants = sameCurrencyPool
+                .map { it.normalizedMerchantId }
+                .distinct()
+                .size
+
+            val refVerified = lowest != null && (
+                distinctComparableMerchants >= 2 ||
+                    (lowest.isReferencePriceVerified && lowest.originalPrice != null && (lowest.price ?: 0.0) < lowest.originalPrice)
+                )
+
+            return MerchantComparisonSummary(
+                canonicalTitle = canonicalTitle,
+                lowestPriceListing = lowest,
+                listings = sortedListings,
+                comparableCurrency = dominantCurrency,
+                comparableMerchantCount = distinctComparableMerchants,
+                hasVerifiedReferenceSavings = refVerified
+            )
+        }
+
+        private fun selectComparableTierPool(eligiblePriced: List<MerchantListing>): List<MerchantListing> {
+            val exactListings = eligiblePriced.filter { it.matchType == MatchType.EXACT }
+            val hasTwoSameCurrencyExactMerchants = exactListings
+                .groupBy { it.currency.uppercase(Locale.ROOT) }
+                .values
+                .any { pool -> pool.map { it.normalizedMerchantId }.distinct().size >= 2 }
+            if (hasTwoSameCurrencyExactMerchants) {
+                return exactListings
+            }
+            val exactOrLikely = eligiblePriced.filter {
+                it.matchType == MatchType.EXACT || it.matchType == MatchType.LIKELY
+            }
+            return exactOrLikely.ifEmpty { eligiblePriced }
+        }
+
+        fun sortCanonicalListings(listings: List<MerchantListing>): List<MerchantListing> {
+            return listings.sortedWith(
+                compareByDescending<MerchantListing> { it.hasVerifiedPrice }
+                    .thenBy {
+                        when (it.listingOrigin) {
+                            ListingOrigin.LIVE_API -> 0
+                            ListingOrigin.VERIFIED_CATALOG_FIXTURE -> 1
+                            ListingOrigin.DEMO_DATA -> 2
+                            ListingOrigin.DIRECT_SEARCH_URL -> 3
+                            ListingOrigin.NO_RESULT -> 4
+                        }
                     }
-                }
+                    .thenBy {
+                        when (it.matchType) {
+                            MatchType.EXACT -> 0
+                            MatchType.LIKELY -> 1
+                            MatchType.SIMILAR -> 2
+                        }
+                    }
                     .thenBy {
                         when (it.availability) {
                             AvailabilityStatus.IN_STOCK -> 0
@@ -183,17 +352,29 @@ data class MerchantComparisonSummary(
                             AvailabilityStatus.OUT_OF_STOCK -> 3
                         }
                     }
-                    .thenBy { it.price }
+                    .thenBy { it.price ?: Double.MAX_VALUE }
                     .thenByDescending { it.confidence }
-            )
-
-            return MerchantComparisonSummary(
-                canonicalTitle = canonicalTitle,
-                lowestPriceListing = lowest,
-                listings = sortedListings
             )
         }
     }
+}
+
+/**
+ * Structured output from multi-merchant discovery separating verified offers, alternatives,
+ * store search links, and unavailable merchants.
+ */
+data class MerchantDiscoveryResult(
+    val canonicalQuery: String?,
+    val rejectedReason: SearchQueryBuilder.RejectionReason? = null,
+    val exactMatches: List<MerchantListing> = emptyList(),
+    val similarAlternatives: List<MerchantListing> = emptyList(),
+    val searchLinks: List<MerchantListing> = emptyList(),
+    val unavailableMerchants: List<MerchantListing> = emptyList(),
+    val comparisonSummary: MerchantComparisonSummary? = null
+) {
+    val allInteractiveListings: List<MerchantListing>
+        get() = (exactMatches + similarAlternatives + searchLinks)
+            .distinctBy { "${it.normalizedMerchantId}::${SearchQueryBuilder.normalizeProductIdentityKey(it.title)}" }
 }
 
 /**

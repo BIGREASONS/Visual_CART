@@ -4,8 +4,12 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.paypal.visualcart.domain.model.MatchResult
 import com.paypal.visualcart.domain.model.MatchType
+import com.paypal.visualcart.domain.model.RecognitionSource
+import com.paypal.visualcart.domain.model.RecognitionStatus
 import com.paypal.visualcart.domain.model.RecognizedProduct
+import com.paypal.visualcart.domain.model.RecognizedProductCandidate
 import com.paypal.visualcart.domain.model.StructuredAiProduct
+import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -36,7 +40,7 @@ data class NetworkResponse(
  */
 class DefaultHttpNetworkTransport(
     private val connectTimeoutMs: Int = 5000,
-    private val readTimeoutMs: Int = 15000
+    private val readTimeoutMs: Int = 25000
 ) : NetworkTransport {
     override fun post(url: String, headers: Map<String, String>, body: String): NetworkResponse {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -88,8 +92,9 @@ class CloudProductUnderstandingProvider(
     private var cachedBackendEndpointUrl: String? = null
 
     companion object {
-        const val PROVIDER_NAME = "PayPal Cloud Multimodal AI (Gemini 2.5 / Proxy)"
-        const val DEFAULT_MODEL = "gemini-2.5-flash"
+        const val PROVIDER_NAME = "PayPal Cloud Multimodal AI (Gemini Vision / Proxy)"
+        const val DEFAULT_MODEL = "gemini-3.8-flash"
+        val FALLBACK_MODELS = listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash")
         const val BACKEND_PROXY_PATH = "/api/v1/ai/recognize-product"
         private val BACKEND_CANDIDATE_URLS = listOf(
             "http://localhost:8000",
@@ -201,27 +206,39 @@ class CloudProductUnderstandingProvider(
     // ---------------------------------------------------------------------------------------------
 
     private fun executeTextInference(text: String): RecognizedProduct? {
+        if (SearchQueryBuilder.isNonProductNoise(text)) return null
         val proxy = resolveActiveEndpointUrl()
-        val targetUrl = if (!proxy.isNullOrBlank()) {
-            proxy
-        } else if (!apiKey.isNullOrBlank()) {
-            "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
-        } else {
-            return null
-        }
-
-        val requestBody = if (!proxy.isNullOrBlank()) {
-            buildBackendProxyPayload(
+        val response: NetworkResponse?
+        if (!proxy.isNullOrBlank()) {
+            val requestBody = buildBackendProxyPayload(
                 text = text,
                 contextText = text,
                 imagePayload = null
             )
-        } else {
+            response = callEndpoint(proxy, requestBody)
+        } else if (!apiKey.isNullOrBlank()) {
             val prompt = buildDirectGeminiPrompt(contextText = text)
-            buildDirectGeminiPayload(prompt, imagePayload = null)
+            val requestBody = buildDirectGeminiPayload(prompt, imagePayload = null)
+            val candidateModels = (listOf(modelName) + FALLBACK_MODELS).distinct()
+            var best: NetworkResponse? = null
+            for (candidateModel in candidateModels) {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$candidateModel:generateContent?key=$apiKey"
+                val attempt = callEndpoint(url, requestBody)
+                if (attempt != null && attempt.isSuccessful && !attempt.body.isNullOrBlank()) {
+                    best = attempt
+                    break
+                }
+                best = attempt
+                val code = attempt?.statusCode ?: 0
+                if (code != 404 && code != 400 && code != 503 && code != 429) {
+                    break
+                }
+            }
+            response = best
+        } else {
+            return null
         }
 
-        val response = callEndpoint(targetUrl, requestBody)
         if (response == null || !response.isSuccessful || response.body.isNullOrBlank()) {
             return null
         }
@@ -233,52 +250,104 @@ class CloudProductUnderstandingProvider(
 
         // Secondary fallback: extract raw text from LLM response and parse locally
         val rawSnippet = extractPlainTextSnippet(response.body)
-        if (rawSnippet.isNotBlank()) {
+        if (rawSnippet.isNotBlank() && !SearchQueryBuilder.isNonProductNoise(rawSnippet)) {
             val local = LocalProductParser.parse(rawSnippet)
-            return local.copy(isDemoFixture = false, isLiveInference = true)
+            return local.copy(
+                isDemoFixture = false,
+                isLiveInference = true,
+                recognitionSource = RecognitionSource.LIVE_AI,
+                aiModelName = modelName
+            )
         }
 
         return null
     }
 
-    private fun executeImageInference(imageUri: String, contextText: String?): RecognizedProduct? {
-        val imagePayload = resolveImagePayload(imageUri)
-        val proxy = resolveActiveEndpointUrl()
+    private fun redactUrlForLog(url: String): String =
+        url.replace(Regex("([?&]key=)[^&]+"), "$1***")
 
-        val targetUrl = if (!proxy.isNullOrBlank()) {
-            proxy
-        } else if (!apiKey.isNullOrBlank()) {
-            "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
-        } else {
+    private fun logAiDiag(msg: String) {
+        try {
+            println("VisualCartAI: $msg")
+        } catch (_: Throwable) {
+            // Safe no-op
+        }
+    }
+
+    private fun executeImageInference(imageUri: String, contextText: String?): RecognizedProduct? {
+        val cleanContext = contextText?.takeIf { !SearchQueryBuilder.isNonProductNoise(it) }
+        val imagePayload = resolveImagePayload(imageUri)
+        val hasImageContent = !imagePayload.base64Data.isNullOrBlank() || !imagePayload.remoteUrl.isNullOrBlank()
+        if (!hasImageContent && cleanContext.isNullOrBlank()) {
+            logAiDiag("skipped inference: no decodable image bytes and no clean text hint")
             return null
         }
 
-        val requestBody = if (!proxy.isNullOrBlank()) {
-            buildBackendProxyPayload(
-                text = contextText,
-                contextText = contextText,
+        val proxy = resolveActiveEndpointUrl()
+        val requestId = UUID.randomUUID().toString().take(8)
+        logAiDiag(
+            "request[$requestId] mime=${imagePayload.mimeType} base64_chars=${imagePayload.base64Data?.length ?: 0} " +
+                "has_remote_url=${!imagePayload.remoteUrl.isNullOrBlank()} mode=${if (!proxy.isNullOrBlank()) "proxy" else "direct"}"
+        )
+
+        val response: NetworkResponse?
+        var resolvedTargetUrl: String? = null
+        if (!proxy.isNullOrBlank()) {
+            resolvedTargetUrl = proxy
+            val requestBody = buildBackendProxyPayload(
+                text = cleanContext,
+                contextText = cleanContext,
                 imagePayload = imagePayload
             )
+            response = callEndpoint(proxy, requestBody)
+        } else if (!apiKey.isNullOrBlank()) {
+            val prompt = buildDirectGeminiPrompt(contextText = cleanContext)
+            val requestBody = buildDirectGeminiPayload(prompt, imagePayload = imagePayload)
+            val candidateModels = (listOf(modelName) + FALLBACK_MODELS).distinct()
+            var bestResponse: NetworkResponse? = null
+            for (candidateModel in candidateModels) {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$candidateModel:generateContent?key=$apiKey"
+                resolvedTargetUrl = url
+                val attempt = callEndpoint(url, requestBody)
+                if (attempt != null && attempt.isSuccessful && !attempt.body.isNullOrBlank()) {
+                    bestResponse = attempt
+                    break
+                }
+                bestResponse = attempt
+                val code = attempt?.statusCode ?: 0
+                if (code != 404 && code != 400 && code != 503 && code != 429) {
+                    break
+                }
+            }
+            response = bestResponse
         } else {
-            val prompt = buildDirectGeminiPrompt(contextText = contextText)
-            buildDirectGeminiPayload(prompt, imagePayload = imagePayload)
-        }
-
-        val response = callEndpoint(targetUrl, requestBody)
-        if (response == null || !response.isSuccessful || response.body.isNullOrBlank()) {
             return null
         }
 
-        val structured = parseStructuredProduct(response.body, fallbackText = contextText.orEmpty())
+        if (response == null || !response.isSuccessful || response.body.isNullOrBlank()) {
+            logAiDiag("request[$requestId] failed status=${response?.statusCode} endpoint=${resolvedTargetUrl?.let(::redactUrlForLog)}")
+            return null
+        }
+
+        val structured = parseStructuredProduct(response.body, fallbackText = cleanContext.orEmpty())
         if (structured != null) {
-            return toRecognizedProduct(structured, imageUri = imageUri, contextText = contextText)
+            logAiDiag(
+                "request[$requestId] parsed status=${structured.status} source=${structured.recognitionSource} " +
+                    "category=${structured.category} confidence=${structured.confidence} query='${structured.searchQuery}'"
+            )
+            return toRecognizedProduct(structured, imageUri = imageUri, contextText = cleanContext)
         }
 
         // Secondary fallback
         val rawSnippet = extractPlainTextSnippet(response.body)
-        if (rawSnippet.isNotBlank()) {
+        if (rawSnippet.isNotBlank() && !SearchQueryBuilder.isNonProductNoise(rawSnippet)) {
             val local = LocalProductParser.parse(rawSnippet, imageUrl = imageUri)
-            return local.copy(isDemoFixture = false, isLiveInference = true)
+            return local.copy(
+                isDemoFixture = false,
+                isLiveInference = true,
+                recognitionSource = RecognitionSource.LIVE_AI,
+                aiModelName = modelName
+            )
         }
 
         return null
@@ -309,8 +378,37 @@ class CloudProductUnderstandingProvider(
             mergedSpecs["model"] = structured.model
         }
 
-        val confidence = structured.confidence.coerceIn(0.1f, 1.0f)
+        val effectiveStatus = when {
+            structured.status == RecognitionStatus.UNIDENTIFIED ||
+                structured.productName.equals("Unidentified Product", ignoreCase = true) ||
+                structured.category.equals("Unidentified", ignoreCase = true) -> RecognitionStatus.UNIDENTIFIED
+            structured.status == RecognitionStatus.PARTIAL || structured.candidates.size > 1 -> RecognitionStatus.PARTIAL
+            else -> RecognitionStatus.IDENTIFIED
+        }
+
+        val confidence = if (effectiveStatus == RecognitionStatus.UNIDENTIFIED) {
+            structured.confidence.coerceIn(0.0f, 0.25f)
+        } else {
+            structured.confidence.coerceIn(0.1f, 1.0f)
+        }
         val brandPart = structured.brand?.let { "$it " } ?: ""
+
+        val sanitizedSearchQuery = when (effectiveStatus) {
+            RecognitionStatus.UNIDENTIFIED -> ""
+            else -> {
+                SearchQueryBuilder.buildFromRawQuery(structured.searchQuery).validQueryOrNull
+                    ?: SearchQueryBuilder.build(
+                        SearchQueryBuilder.Input(
+                            productName = structured.productName,
+                            brand = structured.brand,
+                            model = structured.model,
+                            category = structured.category,
+                            colour = structured.colour,
+                            specifications = mergedSpecs
+                        )
+                    ).validQueryOrNull.orEmpty()
+            }
+        }
 
         return RecognizedProduct(
             id = UUID.randomUUID().toString(),
@@ -320,15 +418,26 @@ class CloudProductUnderstandingProvider(
             specifications = mergedSpecs,
             confidence = confidence,
             imageUrl = imageUri,
-            rawTextSnippet = contextText ?: structured.productName,
-            matchType = MatchType.EXACT,
+            rawTextSnippet = contextText?.takeIf { !SearchQueryBuilder.isNonProductNoise(it) }
+                ?: if (effectiveStatus == RecognitionStatus.UNIDENTIFIED) "" else structured.productName,
+            matchType = when (effectiveStatus) {
+                RecognitionStatus.IDENTIFIED -> MatchType.EXACT
+                RecognitionStatus.PARTIAL -> MatchType.LIKELY
+                RecognitionStatus.UNIDENTIFIED -> MatchType.SIMILAR
+            },
             matchReason = structured.matchReason.ifBlank {
                 "Multimodal AI recognized $brandPart${structured.productName} (${(confidence * 100).toInt()}% confidence)."
             },
             isDemoFixture = structured.isDemoFixture,
             isLiveInference = structured.isLiveInference,
             colour = structured.colour,
-            model = structured.model
+            model = structured.model,
+            status = effectiveStatus,
+            recognitionSource = structured.recognitionSource,
+            searchQuery = sanitizedSearchQuery,
+            aiModelName = structured.aiModelName ?: modelName,
+            candidates = structured.candidates,
+            diagnosticNote = structured.diagnosticNote
         )
     }
 
@@ -344,16 +453,16 @@ class CloudProductUnderstandingProvider(
         val fields = mutableListOf<String>()
 
         val effectiveHint = listOfNotNull(
-            text?.takeIf { it.isNotBlank() },
-            contextText?.takeIf { it.isNotBlank() }
+            text?.takeIf { it.isNotBlank() && !SearchQueryBuilder.isNonProductNoise(it) },
+            contextText?.takeIf { it.isNotBlank() && !SearchQueryBuilder.isNonProductNoise(it) }
         ).distinct().joinToString(" - ")
         if (effectiveHint.isNotBlank()) {
             fields.add("\"hint_text\":\"${escapeJson(effectiveHint)}\"")
         }
-        if (!text.isNullOrBlank()) {
+        if (!text.isNullOrBlank() && !SearchQueryBuilder.isNonProductNoise(text)) {
             fields.add("\"text\":\"${escapeJson(text)}\"")
         }
-        if (!contextText.isNullOrBlank()) {
+        if (!contextText.isNullOrBlank() && !SearchQueryBuilder.isNonProductNoise(contextText)) {
             fields.add("\"context_text\":\"${escapeJson(contextText)}\"")
         }
         if (imagePayload != null) {
@@ -371,22 +480,46 @@ class CloudProductUnderstandingProvider(
     }
 
     fun buildDirectGeminiPrompt(contextText: String?): String {
-        val contextPart = if (!contextText.isNullOrBlank()) " Context/Hint: $contextText." else ""
+        val cleanContext = contextText?.takeIf { !SearchQueryBuilder.isNonProductNoise(it) }
+        val contextPart = if (!cleanContext.isNullOrBlank()) {
+            "\nOptional clean user text hint (treat only as secondary context, inspect the actual image first): \"$cleanContext\"."
+        } else {
+            ""
+        }
         return """
-            You are an expert multimodal e-commerce product recognition engine for PayPal Visual Cart.
-            Analyze the product in this image and/or text context.$contextPart
-            Extract structured specifications and respond strictly with valid JSON conforming to this schema:
+            You are a zero-hallucination multimodal e-commerce product recognition engine for PayPal Visual Cart.
+            Inspect the actual pixels, logos, labels, shape, material, and visible text in the image.$contextPart
+            CRITICAL ANTI-HALLUCINATION RULES:
+            - NEVER invent a brand, model number, price, or electronics category if it is not clearly legible or visually certain.
+            - NEVER copy filenames, capture timestamps (e.g. capture_*, shared image.jpg), or storage paths as product_name or search_query.
+            - If the image shows industrial or raw materials (such as PVC/metal pipes, fasteners, cables, timber), set category to "Industrial Materials" or "Hardware & Tools" — NEVER default to "Electronics".
+            - If the product category/material is visible (e.g. "Metal pipes") without an exact brand/SKU, set status to "PARTIAL", include `"Material": "Uncertain from image alone"` or `"Specifications": "Not verified"` in specifications, and give a clean generic search_query like "metal pipe" or "galvanized steel pipe".
+            - If 2 or 3 distinct candidate matches are plausible, populate "candidates" (up to 3 items) and set status to "PARTIAL".
+            - If the image is blank, unreadable, or ambiguous without a clear product, set status to "UNIDENTIFIED", product_name to "Unidentified Product", category to "Unidentified", search_query to "", confidence <= 0.25.
+
+            Respond strictly with valid JSON matching:
             {
-              "brand": "Brand or manufacturer name, or null",
-              "product_name": "Canonical product name without marketing hype",
-              "category": "Electronics | Footwear | Audio | Computers | Gaming | Fashion | Home | Accessories | Other",
-              "colour": "Color or finish (e.g., Space Gray, Silver, Triple Black, Graphite) or null",
-              "model": "Model identifier or series (e.g., 990 EVO, WH-1000XM5, Air Max 270) or null",
-              "specifications": {
-                "key": "value"
-              },
-              "confidence": 0.95,
-              "match_reason": "Brief human-readable explanation"
+              "status": "IDENTIFIED | PARTIAL | UNIDENTIFIED",
+              "brand": "string or null",
+              "product_name": "Canonical human-readable product name or descriptive object phrase",
+              "category": "Industrial Materials | Hardware & Tools | Electronics | Computers | Audio | Gaming | Footwear | Fashion | Home | Accessories | Other | Unidentified",
+              "model": "string or null",
+              "colour": "string or null",
+              "search_query": "Clean merchant search phrase without filenames or timestamps (empty if UNIDENTIFIED)",
+              "specifications": {"key": "value"},
+              "candidates": [
+                {
+                  "brand": "string or null",
+                  "title": "Candidate product name",
+                  "category": "Category",
+                  "model": "string or null",
+                  "colour": "string or null",
+                  "search_query": "Clean search phrase",
+                  "confidence": 0.55
+                }
+              ],
+              "confidence": 0.85,
+              "match_reason": "Concise visual evidence explaining what is visible vs uncertain"
             }
         """.trimIndent()
     }
@@ -397,7 +530,7 @@ class CloudProductUnderstandingProvider(
     ): String {
         val parts = mutableListOf<String>()
         if (imagePayload?.base64Data != null) {
-            parts.add("""{"inlineData":{"mimeType":"${imagePayload.mimeType}","data":"${imagePayload.base64Data}"}}""")
+            parts.add("""{"inlineData":{"mimeType":"${escapeJson(imagePayload.mimeType)}","data":"${imagePayload.base64Data}"}}""")
         }
         parts.add("""{"text":"${escapeJson(prompt)}"}""")
 
@@ -449,23 +582,25 @@ class CloudProductUnderstandingProvider(
         val file = File(filePath)
         if (file.exists() && file.isFile && file.length() > 0) {
             try {
+                val rawBytes = file.readBytes()
+                val sniffedMime = sniffMimeTypeFromBytes(rawBytes)
                 val compressed = compressLargeImageIfPossible(file)
-                val bytes = compressed ?: file.readBytes()
-                val b64 = Base64.getEncoder().encodeToString(bytes)
-                val ext = file.extension.lowercase()
-                val mime = if (compressed != null) {
+                val finalBytes = compressed ?: rawBytes
+                val b64 = Base64.getEncoder().encodeToString(finalBytes)
+                val finalMime = if (compressed != null) {
                     "image/jpeg"
                 } else {
-                    when (ext) {
+                    sniffedMime ?: when (file.extension.lowercase()) {
                         "png" -> "image/png"
                         "webp" -> "image/webp"
+                        "gif" -> "image/gif"
                         "heic", "heif" -> "image/heic"
                         else -> "image/jpeg"
                     }
                 }
-                return ImagePayload(base64Data = b64, mimeType = mime)
+                return ImagePayload(base64Data = b64, mimeType = finalMime)
             } catch (_: Exception) {
-                // Ignore read errors and treat as raw identifier
+                // Ignore read errors
             }
         }
 
@@ -474,10 +609,31 @@ class CloudProductUnderstandingProvider(
             return ImagePayload(base64Data = trimmed, mimeType = "image/jpeg")
         }
 
-        return ImagePayload(remoteUrl = trimmed)
+        // Never pass raw local/content URIs or temp filenames as remoteUrl
+        return ImagePayload(base64Data = null, mimeType = "image/jpeg", remoteUrl = null)
     }
 
-    private fun compressLargeImageIfPossible(file: File, maxBytes: Long = 512_000L, maxDim: Int = 1024): ByteArray? {
+    private fun sniffMimeTypeFromBytes(bytes: ByteArray): String? {
+        if (bytes.size >= 8 &&
+            bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+            bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
+        ) return "image/png"
+        if (bytes.size >= 3 &&
+            bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte()
+        ) return "image/jpeg"
+        if (bytes.size >= 12 &&
+            bytes[0] == 0x52.toByte() && bytes[1] == 0x49.toByte() &&
+            bytes[2] == 0x46.toByte() && bytes[3] == 0x46.toByte() &&
+            bytes[8] == 0x57.toByte() && bytes[9] == 0x45.toByte() &&
+            bytes[10] == 0x42.toByte() && bytes[11] == 0x50.toByte()
+        ) return "image/webp"
+        if (bytes.size >= 6 &&
+            bytes[0] == 0x47.toByte() && bytes[1] == 0x49.toByte() && bytes[2] == 0x46.toByte()
+        ) return "image/gif"
+        return null
+    }
+
+    private fun compressLargeImageIfPossible(file: File, maxBytes: Long = 900_000L, maxDim: Int = 1536): ByteArray? {
         if (file.length() <= maxBytes) return null
         return try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -531,11 +687,11 @@ class CloudProductUnderstandingProvider(
                 @Suppress("UNCHECKED_CAST")
                 val rootMap = parsedRoot as Map<String, Any?>
 
-                // Case 1: Gemini candidates response
-                val candidates = rootMap["candidates"] as? List<*>
-                if (!candidates.isNullOrEmpty()) {
-                    val firstCandidate = candidates[0] as? Map<*, *>
-                    val content = firstCandidate?.get("content") as? Map<*, *>
+                // Case 1: Gemini generateContent envelope (candidates[0].content.parts)
+                val geminiCandidates = rootMap["candidates"] as? List<*>
+                val firstGeminiCandidate = geminiCandidates?.firstOrNull() as? Map<*, *>
+                if (firstGeminiCandidate != null && firstGeminiCandidate.containsKey("content")) {
+                    val content = firstGeminiCandidate["content"] as? Map<*, *>
                     val parts = content?.get("parts") as? List<*>
                     val firstPart = parts?.firstOrNull() as? Map<*, *>
                     val candidateText = firstPart?.get("text") as? String
@@ -550,8 +706,10 @@ class CloudProductUnderstandingProvider(
                             @Suppress("UNCHECKED_CAST")
                             targetMap = innerParsed as Map<String, Any?>
                         } else {
-                            // Plain text candidate: parse locally via LocalProductParser
-                            val local = LocalProductParser.parse(inner)
+                            // Plain text candidate: reject raw capture filenames before falling back to local parser
+                            val cleanInner = inner.takeIf { !SearchQueryBuilder.isNonProductNoise(it) }.orEmpty()
+                            if (cleanInner.isBlank()) return null
+                            val local = LocalProductParser.parse(cleanInner)
                             return StructuredAiProduct(
                                 brand = local.brand,
                                 productName = local.title,
@@ -562,7 +720,11 @@ class CloudProductUnderstandingProvider(
                                 confidence = local.confidence,
                                 matchReason = "Extracted from Gemini multimodal response: ${local.matchReason}",
                                 isDemoFixture = false,
-                                isLiveInference = true
+                                isLiveInference = true,
+                                status = local.status,
+                                recognitionSource = RecognitionSource.LIVE_AI,
+                                searchQuery = local.searchQuery,
+                                aiModelName = modelName
                             )
                         }
                     }
@@ -574,21 +736,43 @@ class CloudProductUnderstandingProvider(
                     targetMap = rootMap["data"] as Map<String, Any?>
                 }
 
-                // Case 3: Flat structured object (only if not an unparsed candidates envelope)
-                if (targetMap == null && !rootMap.containsKey("candidates")) {
+                // Case 3: Flat structured object (including proxy payloads that carry disambiguation candidates)
+                if (targetMap == null && (
+                        rootMap.containsKey("product_name") ||
+                            rootMap.containsKey("productName") ||
+                            rootMap.containsKey("title") ||
+                            rootMap.containsKey("name") ||
+                            !rootMap.containsKey("candidates")
+                        )
+                ) {
                     targetMap = rootMap
                 }
             }
 
             if (targetMap == null) return null
 
-            val brand = targetMap["brand"]?.toString()?.takeIf { it.isNotBlank() && it != "null" }
-            val productName = (targetMap["product_name"] ?: targetMap["productName"] ?: targetMap["title"] ?: targetMap["name"])
+            val brand = targetMap["brand"]?.toString()?.takeIf {
+                it.isNotBlank() && it != "null" && !SearchQueryBuilder.isNonProductNoise(it)
+            }
+            val rawProductName = (targetMap["product_name"] ?: targetMap["productName"] ?: targetMap["title"] ?: targetMap["name"])
                 ?.toString()?.takeIf { it.isNotBlank() && it != "null" }
-                ?: fallbackText.takeIf { it.isNotBlank() }
+                ?: fallbackText.takeIf { it.isNotBlank() && !SearchQueryBuilder.isNonProductNoise(it) }
                 ?: return null
 
-            val category = targetMap["category"]?.toString()?.takeIf { it.isNotBlank() && it != "null" } ?: "General"
+            val productName = if (SearchQueryBuilder.isNonProductNoise(rawProductName) &&
+                !rawProductName.equals("Unidentified Product", ignoreCase = true)
+            ) {
+                "Unidentified Product"
+            } else {
+                rawProductName
+            }
+
+            val rawCategory = targetMap["category"]?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+            val category = when {
+                productName.equals("Unidentified Product", ignoreCase = true) -> "Unidentified"
+                rawCategory.isNullOrBlank() || rawCategory.equals("General", ignoreCase = true) -> "Other"
+                else -> rawCategory
+            }
             val colour = (targetMap["colour"] ?: targetMap["color"])?.toString()?.takeIf { it.isNotBlank() && it != "null" }
             val model = (targetMap["model"] ?: targetMap["model_number"] ?: targetMap["modelNumber"])?.toString()?.takeIf { it.isNotBlank() && it != "null" }
 
@@ -613,23 +797,65 @@ class CloudProductUnderstandingProvider(
                 is Number -> confNum.toFloat()
                 is String -> confNum.toFloatOrNull() ?: 0.90f
                 else -> 0.90f
-            }.coerceIn(0.1f, 1.0f)
+            }.coerceIn(0.0f, 1.0f)
 
             val matchReason = targetMap["match_reason"]?.toString()
                 ?: "Multimodal AI identified ${brand ?: ""} $productName with ${(confidence * 100).toInt()}% confidence."
 
             val source = targetMap["source"]?.toString()?.lowercase()
-            val isUnidentified = source == "needs_gemini_key" ||
+            val recognitionSourceStr = targetMap["recognition_source"]?.toString()?.uppercase()
+            val statusStr = targetMap["status"]?.toString()?.uppercase()
+
+            val isUnidentified = statusStr == "UNIDENTIFIED" ||
+                source == "needs_gemini_key" ||
                 source == "vision_unidentified" ||
+                source == "rejected_noise" ||
                 productName.equals("Unidentified Product", ignoreCase = true) ||
                 category.equals("Unidentified", ignoreCase = true)
 
-            val isDemo = targetMap["is_demo_fixture"] as? Boolean ?: false
-            val isLive = if (isUnidentified) {
-                false
-            } else {
-                targetMap["is_live_inference"] as? Boolean ?: (!isDemo)
+            val parsedCandidates = parseCandidateList(targetMap["candidates"])
+            val parsedStatus = when {
+                isUnidentified -> RecognitionStatus.UNIDENTIFIED
+                statusStr == "PARTIAL" || parsedCandidates.size > 1 -> RecognitionStatus.PARTIAL
+                else -> RecognitionStatus.IDENTIFIED
             }
+
+            val isDemo = targetMap["is_demo_fixture"] as? Boolean
+                ?: (recognitionSourceStr == "DEMO" || source == "demo")
+            val isLive = when {
+                isUnidentified -> false
+                recognitionSourceStr == "LIVE_AI" -> true
+                recognitionSourceStr == "FALLBACK" || source == "local_fallback" -> false
+                else -> targetMap["is_live_inference"] as? Boolean ?: (!isDemo)
+            }
+            val recognitionSource = when {
+                recognitionSourceStr == "LIVE_AI" -> RecognitionSource.LIVE_AI
+                recognitionSourceStr == "DEMO" || isDemo -> RecognitionSource.DEMO
+                recognitionSourceStr == "FALLBACK" || source == "needs_gemini_key" || source == "local_fallback" || source == "vision_unidentified" -> RecognitionSource.FALLBACK
+                isLive -> RecognitionSource.LIVE_AI
+                else -> RecognitionSource.FALLBACK
+            }
+
+            val rawSearchQuery = targetMap["search_query"]?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+            val cleanSearchQuery = if (parsedStatus == RecognitionStatus.UNIDENTIFIED) {
+                ""
+            } else {
+                SearchQueryBuilder.buildFromRawQuery(rawSearchQuery).validQueryOrNull
+                    ?: SearchQueryBuilder.build(
+                        SearchQueryBuilder.Input(
+                            productName = productName,
+                            brand = brand,
+                            model = model,
+                            category = category,
+                            colour = colour,
+                            specifications = specsMap
+                        )
+                    ).validQueryOrNull.orEmpty()
+            }
+
+            val parsedModelName = (targetMap["model_name"] ?: targetMap["ai_model_name"])
+                ?.toString()?.takeIf { it.isNotBlank() && it != "null" } ?: modelName
+            val diagnosticNote = targetMap["diagnostic_note"]?.toString()?.takeIf { it.isNotBlank() && it != "null" }
 
             StructuredAiProduct(
                 brand = brand,
@@ -641,11 +867,54 @@ class CloudProductUnderstandingProvider(
                 confidence = confidence,
                 matchReason = matchReason,
                 isDemoFixture = isDemo,
-                isLiveInference = isLive
+                isLiveInference = isLive,
+                status = parsedStatus,
+                recognitionSource = recognitionSource,
+                searchQuery = cleanSearchQuery,
+                aiModelName = parsedModelName,
+                candidates = parsedCandidates,
+                diagnosticNote = diagnosticNote
             )
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun parseCandidateList(raw: Any?): List<RecognizedProductCandidate> {
+        val list = raw as? List<*> ?: return emptyList()
+        return list.mapNotNull { item ->
+            val m = item as? Map<*, *> ?: return@mapNotNull null
+            val rawTitle = (m["title"] ?: m["product_name"] ?: m["name"])?.toString()?.trim().orEmpty()
+            if (rawTitle.isBlank() || SearchQueryBuilder.isNonProductNoise(rawTitle)) return@mapNotNull null
+            val candBrand = m["brand"]?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+            val candCategory = m["category"]?.toString()?.takeIf { it.isNotBlank() && it != "null" } ?: "Other"
+            val candModel = m["model"]?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+            val candColour = (m["colour"] ?: m["color"])?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+            val candQuery = SearchQueryBuilder.buildFromRawQuery(m["search_query"]?.toString()).validQueryOrNull
+                ?: SearchQueryBuilder.build(
+                    SearchQueryBuilder.Input(
+                        productName = rawTitle,
+                        brand = candBrand,
+                        model = candModel,
+                        category = candCategory,
+                        colour = candColour
+                    )
+                ).validQueryOrNull.orEmpty()
+            val conf = when (val c = m["confidence"]) {
+                is Number -> c.toFloat()
+                is String -> c.toFloatOrNull() ?: 0.5f
+                else -> 0.5f
+            }.coerceIn(0.0f, 1.0f)
+            RecognizedProductCandidate(
+                brand = candBrand,
+                title = rawTitle,
+                category = candCategory,
+                model = candModel,
+                colour = candColour,
+                searchQuery = candQuery,
+                confidence = conf
+            )
+        }.take(3)
     }
 
     private fun extractPlainTextSnippet(json: String): String {

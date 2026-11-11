@@ -80,8 +80,8 @@ import com.paypal.visualcart.core.designsystem.VisualCartTypography
 import com.paypal.visualcart.core.designsystem.WarmIvory
 
 enum class AiProviderOption(val title: String, val subtitle: String) {
-    ON_DEVICE_NANO("Local On-Device (Gemini Nano)", "Private, offline attribute extraction and instant inference"),
-    CLOUD_GEMINI("Cloud Multimodal (Gemini 1.5)", "Highest accuracy cross-merchant catalog matching"),
+    ON_DEVICE_NANO("Local On-Device (Heuristic Parser)", "Private, offline attribute extraction and instant inference"),
+    CLOUD_GEMINI("Cloud Multimodal (Gemini Flash)", "Highest accuracy cross-merchant visual identification"),
     DEMO_FIXTURES("Curated Demo Fixtures", "Deterministic sample listings for offline hackathon testing")
 }
 
@@ -91,7 +91,7 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var floatingBubbleEnabled by remember { mutableStateOf(false) }
+    var floatingBubbleEnabled by remember { mutableStateOf(com.paypal.visualcart.service.overlay.VisualCartOverlayService.isRunning) }
     var demoDataEnabled by remember { mutableStateOf(true) }
     var selectedAiProvider by remember { mutableStateOf(AiProviderOption.DEMO_FIXTURES) }
     var showClearHistoryDialog by remember { mutableStateOf(false) }
@@ -107,6 +107,7 @@ fun SettingsScreen(
                 hasOverlayPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     Settings.canDrawOverlays(context)
                 } else true
+                floatingBubbleEnabled = com.paypal.visualcart.service.overlay.VisualCartOverlayService.isRunning
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -206,6 +207,11 @@ fun SettingsScreen(
                                         context.startActivity(intent)
                                     } else {
                                         floatingBubbleEnabled = isChecked
+                                        if (isChecked) {
+                                            com.paypal.visualcart.service.overlay.VisualCartOverlayService.start(context)
+                                        } else {
+                                            com.paypal.visualcart.service.overlay.VisualCartOverlayService.stop(context)
+                                        }
                                     }
                                 },
                                 colors = SwitchDefaults.colors(

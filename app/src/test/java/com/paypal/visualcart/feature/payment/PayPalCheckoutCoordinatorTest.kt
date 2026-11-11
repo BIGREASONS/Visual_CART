@@ -65,7 +65,7 @@ class PayPalCheckoutCoordinatorTest {
             taxRate: Double,
             deliveryFee: Double
         ): CreateOrderServerResult {
-            val subtotal = listing.price * quantity
+            val subtotal = (listing.price ?: 0.0) * quantity
             val tax = Math.round(subtotal * taxRate * 100.0) / 100.0
             val total = Math.round((subtotal + tax + deliveryFee) * 100.0) / 100.0
             val summary = OrderSummary(
@@ -405,8 +405,8 @@ class PayPalCheckoutCoordinatorTest {
                 deliveryFee: Double
             ): CreateOrderServerResult? {
                 requestedCurrency = listing.currency
-                requestedAmount = listing.price
-                val subtotal = listing.price * quantity
+                requestedAmount = listing.price ?: 0.0
+                val subtotal = (listing.price ?: 0.0) * quantity
                 val tax = Math.round(subtotal * taxRate * 100.0) / 100.0
                 val total = Math.round((subtotal + tax + deliveryFee) * 100.0) / 100.0
                 val summary = OrderSummary(

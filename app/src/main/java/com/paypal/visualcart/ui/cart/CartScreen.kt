@@ -87,7 +87,7 @@ data class CartItemUiModel(
     val brand: String,
     val category: String,
     val specs: List<String>,
-    val verifiedPrice: Double,
+    val verifiedPrice: Double?,
     val originalPrice: Double?,
     val bestMerchant: String,
     val productUrl: String,
@@ -95,10 +95,20 @@ data class CartItemUiModel(
     val confidence: Float,
     val otherMerchants: List<String> = emptyList(),
     val isDemo: Boolean = true,
-    val isSavedFromDb: Boolean = false
+    val isSavedFromDb: Boolean = false,
+    val currency: String = "INR",
+    val isBestPriceComparable: Boolean = !isDemo.not() && originalPrice != null,
+    val comparableSavings: Double? = null
 ) {
+    val hasVerifiedPrice: Boolean
+        get() = verifiedPrice != null && verifiedPrice > 0.0
+
     val savings: Double?
-        get() = if (originalPrice != null && originalPrice > verifiedPrice) originalPrice - verifiedPrice else null
+        get() {
+            val vp = verifiedPrice?.takeIf { it > 0.0 } ?: return null
+            comparableSavings?.takeIf { it > 0.0 }?.let { return it }
+            return if (originalPrice != null && originalPrice > vp) originalPrice - vp else null
+        }
 }
 
 enum class CartSortOption(val label: String) {
@@ -209,8 +219,23 @@ fun CartScreen(
 
     val savedCartItems = remember(dbProducts) {
         dbProducts.map { saved ->
-            val selected = saved.selectedListing ?: saved.lowestPriceListing ?: saved.listings.firstOrNull()
-            val price = selected?.price ?: 0.0
+            val pricedListings = saved.listings.filter { it.hasVerifiedPrice }
+            val selected = saved.selectedListing?.takeIf { it.hasVerifiedPrice }
+                ?: saved.lowestPriceListing
+                ?: saved.listings.firstOrNull()
+            val price = selected?.takeIf { it.hasVerifiedPrice }?.price
+            val currency = selected?.currency ?: "INR"
+            val sameCurrencyPriced = pricedListings.filter { it.currency.equals(currency, ignoreCase = true) }
+            val distinctMerchants = sameCurrencyPriced.map {
+                com.paypal.visualcart.feature.merchant.SearchQueryBuilder.normalizeMerchantKey(it.merchant)
+            }.distinct()
+            val lowestPriced = sameCurrencyPriced.minByOrNull { it.price ?: Double.MAX_VALUE }
+            val highestPriced = sameCurrencyPriced.maxByOrNull { it.price ?: 0.0 }
+            val multiMerchantSavings = if (distinctMerchants.size >= 2 && lowestPriced?.price != null && highestPriced?.price != null) {
+                (highestPriced.price - lowestPriced.price).takeIf { it > 0.0 }
+            } else {
+                null
+            }
             val matchEnum = runCatching {
                 MatchType.valueOf(selected?.matchType ?: "EXACT")
             }.getOrDefault(MatchType.EXACT)
@@ -235,8 +260,11 @@ fun CartScreen(
                 matchType = matchEnum,
                 confidence = selected?.confidence ?: 0.85f,
                 otherMerchants = otherNames,
-                isDemo = selected?.sourceType != "LIVE",
-                isSavedFromDb = true
+                isDemo = selected?.sourceType == "DEMO" && (selected?.hasVerifiedPrice == true),
+                isSavedFromDb = true,
+                currency = currency,
+                isBestPriceComparable = distinctMerchants.size >= 2,
+                comparableSavings = multiMerchantSavings
             )
         }
     }
@@ -262,15 +290,15 @@ fun CartScreen(
     }.sortedWith { a, b ->
         when (selectedSort) {
             CartSortOption.RECENT -> 0
-            CartSortOption.PRICE_LOW_HIGH -> a.verifiedPrice.compareTo(b.verifiedPrice)
-            CartSortOption.PRICE_HIGH_LOW -> b.verifiedPrice.compareTo(a.verifiedPrice)
+            CartSortOption.PRICE_LOW_HIGH -> (a.verifiedPrice ?: Double.MAX_VALUE).compareTo(b.verifiedPrice ?: Double.MAX_VALUE)
+            CartSortOption.PRICE_HIGH_LOW -> (b.verifiedPrice ?: -1.0).compareTo(a.verifiedPrice ?: -1.0)
             CartSortOption.BIGGEST_SAVINGS -> (b.savings ?: 0.0).compareTo(a.savings ?: 0.0)
             CartSortOption.CATEGORY -> a.category.compareTo(b.category)
         }
     }
 
     val totalSavings = cartItems.sumOf { it.savings ?: 0.0 }
-    val totalCartValue = cartItems.sumOf { it.verifiedPrice }
+    val totalCartValue = cartItems.sumOf { it.verifiedPrice?.takeIf { p -> p > 0.0 } ?: 0.0 }
 
     Surface(
         modifier = modifier.fillMaxSize(),
@@ -609,29 +637,44 @@ private fun CartItemCard(
             ) {
                 Column {
                     Row(verticalAlignment = Alignment.Bottom) {
-                        Text(
-                            text = "₹${item.verifiedPrice.toInt()}",
-                            style = VisualCartTypography.headlineSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = DeepInk
-                            )
-                        )
-                        if (item.originalPrice != null && item.originalPrice > item.verifiedPrice) {
-                            Spacer(modifier = Modifier.width(8.dp))
+                        val verifiedPrice = item.verifiedPrice
+                        if (item.hasVerifiedPrice && verifiedPrice != null) {
                             Text(
-                                text = "₹${item.originalPrice.toInt()}",
-                                style = VisualCartTypography.bodySmall.copy(
-                                    textDecoration = TextDecoration.LineThrough,
+                                text = "₹${verifiedPrice.toInt()}",
+                                style = VisualCartTypography.headlineSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = DeepInk
+                                )
+                            )
+                            if (item.originalPrice != null && item.originalPrice > verifiedPrice) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "₹${item.originalPrice.toInt()}",
+                                    style = VisualCartTypography.bodySmall.copy(
+                                        textDecoration = TextDecoration.LineThrough,
+                                        color = MutedSlate
+                                    )
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = "Check store price",
+                                style = VisualCartTypography.titleMedium.copy(
+                                    fontWeight = FontWeight.SemiBold,
                                     color = MutedSlate
                                 )
                             )
                         }
                     }
                     Text(
-                        text = "Verified best price at ${item.bestMerchant}",
+                        text = when {
+                            item.hasVerifiedPrice && item.isBestPriceComparable -> "Verified best price at ${item.bestMerchant}"
+                            item.hasVerifiedPrice -> "Listed at ${item.bestMerchant}"
+                            else -> "Live search link on ${item.bestMerchant}"
+                        },
                         style = VisualCartTypography.labelSmall.copy(
                             fontSize = 10.sp,
-                            color = ForestGreen
+                            color = if (item.hasVerifiedPrice) ForestGreen else MutedSlate
                         )
                     )
                 }

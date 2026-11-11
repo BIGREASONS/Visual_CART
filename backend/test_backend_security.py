@@ -490,4 +490,222 @@ class TestNegativeTestingAndSecurityEnforcement:
         assert scanned_count > 5
 
 
+class TestVisualCartV12ImageAndMerchantPipeline:
+    """V1.2 regression tests for real image byte inspection, anti-hallucination AI, and search-link honesty."""
+
+    def test_generic_capture_filename_hints_rejected(self):
+        from backend.gemini_client import is_generic_image_hint
+
+        noisy_inputs = [
+            "",
+            "   ",
+            "shared image.jpg",
+            "capture 1794369896240 4816",
+            "capture_1794369896240_4816.png",
+            "IMG_20261111_085200.jpg",
+            "vc_img_550e8400-e29b-41d4-a716-446655440000.jpg",
+            "content://media/external/images/media/42",
+            "Electronics",
+            "General",
+        ]
+        for hint in noisy_inputs:
+            assert is_generic_image_hint(hint) is True, f"Expected noise hint rejected: {hint!r}"
+
+        valid_inputs = [
+            "Logitech MX Master 3S",
+            "Industrial metal pipes",
+            "Samsung 990 EVO 1TB",
+        ]
+        for hint in valid_inputs:
+            assert is_generic_image_hint(hint) is False, f"Valid product hint falsely rejected: {hint!r}"
+
+    def test_inspect_image_payload_sniffs_png_magic_bytes_and_dimensions(self):
+        import base64
+        from backend.gemini_client import inspect_image_payload
+
+        # Valid 1x1 PNG (even if caller falsely declared image/* or image/jpeg)
+        png_1x1 = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        )
+        b64 = base64.b64encode(png_1x1).decode("ascii")
+        info = inspect_image_payload(b64, declared_mime="image/*")
+        assert info["valid"] is True
+        assert info["detected_mime"] == "image/png"
+        assert info["width"] == 1
+        assert info["height"] == 1
+        assert info["bytes_count"] == len(png_1x1)
+
+        # Reject HTML error page passed as image base64
+        html_b64 = base64.b64encode(b"<html><body>404</body></html>").decode("ascii")
+        bad_info = inspect_image_payload(html_b64, declared_mime="image/png")
+        assert bad_info["valid"] is False
+
+    def test_gemini_client_sends_pixels_and_header_key_with_model_fallback(self, monkeypatch):
+        import base64
+        import json as _json
+        import httpx
+
+        calls = []
+        png_1x1_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+        class _FakeResponse:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise httpx.HTTPStatusError("err", request=None, response=None)
+
+            def json(self):
+                return self._payload
+
+        async def _fake_post(self, url, json=None, headers=None):
+            calls.append({"url": url, "json": json, "headers": headers})
+            if len(calls) == 1:
+                # First model returns 404 -> must fall back to secondary active model
+                return _FakeResponse(404, {"error": {"message": "model unavailable"}})
+            return _FakeResponse(
+                200,
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": _json.dumps(
+                                            {
+                                                "status": "PARTIAL",
+                                                "brand": None,
+                                                "product_name": "Galvanized Metal Pipes",
+                                                "category": "Industrial Materials",
+                                                "model": None,
+                                                "colour": "Silver",
+                                                "search_query": "metal pipes",
+                                                "specifications": {
+                                                    "Material": "Uncertain from image alone",
+                                                    "Specifications": "Not verified",
+                                                },
+                                                "candidates": [
+                                                    {
+                                                        "title": "Galvanized Steel Pipes",
+                                                        "category": "Industrial Materials",
+                                                        "search_query": "galvanized steel pipes",
+                                                        "confidence": 0.62,
+                                                    }
+                                                ],
+                                                "confidence": 0.62,
+                                                "match_reason": "Circular hollow metal pipes visible; alloy unverified.",
+                                            }
+                                        )
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+
+        async def _run():
+            gemini = GeminiClient(api_key="test-gemini-secret-key")
+            return await gemini.understand_product(
+                text="capture 1794369896240 4816",
+                image_base64=png_1x1_b64,
+                mime_type="image/*",
+            )
+
+        result = asyncio.run(_run())
+        assert len(calls) == 2
+        # API key MUST be in header, never leaked in URL query parameter
+        for call in calls:
+            assert "key=" not in call["url"]
+            assert call["headers"]["x-goog-api-key"] == "test-gemini-secret-key"
+        parts = calls[1]["json"]["contents"][0]["parts"]
+        assert parts[0]["inline_data"]["mime_type"] == "image/png"
+        assert parts[0]["inline_data"]["data"] == png_1x1_b64
+        prompt_text = parts[1]["text"]
+        assert "1794369896240" not in prompt_text
+
+        assert result["category"] == "Industrial Materials"
+        assert result["status"] == "PARTIAL"
+        assert result["is_live_inference"] is True
+        assert result["detected_mime_type"] == "image/png"
+        assert result["image_dimensions"] == "1x1"
+        assert result["estimated_price"] is None
+
+    def test_merchants_search_rejects_noise_and_returns_unpriced_search_links(self):
+        res_noise = client.get("/api/merchants/search", params={"q": "shared image.jpg"})
+        assert res_noise.status_code == 200
+        noise_data = res_noise.json()
+        assert noise_data["rejected"] is True
+        assert noise_data["listings"] == []
+
+        res_clean = client.get("/api/merchants/search", params={"q": "Galvanized Metal Pipes"})
+        assert res_clean.status_code == 200
+        clean_data = res_clean.json()
+        assert clean_data["rejected"] is False
+        assert len(clean_data["listings"]) >= 3
+        for item in clean_data["listings"]:
+            assert item["price"] is None
+            assert item["originalPrice"] is None
+            assert item["isLowest"] is False
+            assert item["listing_origin"] == "DIRECT_SEARCH_URL"
+
+    def test_gemini_response_schema_has_no_empty_object_and_accepts_list_specs(self):
+        from backend.gemini_client import (
+            GEMINI_RESPONSE_SCHEMA,
+            is_generic_image_hint,
+            sanitize_gemini_parsed_output,
+        )
+
+        def _assert_no_empty_object(node, path="root"):
+            if isinstance(node, dict):
+                if str(node.get("type", "")).upper() == "OBJECT":
+                    props = node.get("properties")
+                    assert isinstance(props, dict) and len(props) > 0, (
+                        f"Empty OBJECT schema at {path} triggers Gemini v1beta 400 error"
+                    )
+                for k, v in node.items():
+                    _assert_no_empty_object(v, f"{path}.{k}")
+            elif isinstance(node, list):
+                for idx, item in enumerate(node):
+                    _assert_no_empty_object(item, f"{path}[{idx}]")
+
+        _assert_no_empty_object(GEMINI_RESPONSE_SCHEMA)
+
+        # Array-format specifications from schema must normalize into a flat dict
+        normalized = sanitize_gemini_parsed_output(
+            {
+                "status": "PARTIAL",
+                "product_name": "PVC Conduit Pipe",
+                "category": "Electronics",
+                "search_query": "pvc conduit pipe",
+                "specifications": [
+                    {"name": "Material", "value": "Uncertain from image alone"},
+                    {"name": "Specifications", "value": "Not verified"},
+                ],
+                "confidence": 0.6,
+            }
+        )
+        assert normalized["category"] == "Industrial Materials"
+        assert normalized["specifications"] == {
+            "Material": "Uncertain from image alone",
+            "Specifications": "Not verified",
+        }
+        assert is_generic_image_hint("vc_img_550e8400-e29b-41d4-a716-446655440000") is True
+
+    def test_backend_recognize_endpoint_honors_hint_text_field(self):
+        res = client.post(
+            "/api/v1/ai/recognize-product",
+            json={"hint_text": "PVC Plastic Water Pipes 2 inch"},
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["category"] == "Industrial Materials"
+        assert "pipes" in body["title"].lower()
+
+
+
 

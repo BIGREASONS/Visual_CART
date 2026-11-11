@@ -20,6 +20,7 @@ import com.paypal.visualcart.core.capture.CaptureIntentEvent
 import com.paypal.visualcart.data.local.VisualCartDatabase
 import com.paypal.visualcart.data.local.entity.MerchantListingEntity
 import com.paypal.visualcart.data.repository.CartRepositoryImpl
+import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
 import com.paypal.visualcart.feature.payment.PayPalCheckoutCoordinator
 import com.paypal.visualcart.feature.payment.PayPalCheckoutUiState
 import com.paypal.visualcart.ui.cart.CartScreen
@@ -30,6 +31,8 @@ import com.paypal.visualcart.ui.matching.DetectedProductMatchResult
 import com.paypal.visualcart.ui.matching.MerchantListingItem
 import com.paypal.visualcart.ui.matching.ProductMatchingBottomSheet
 import com.paypal.visualcart.ui.matching.defaultDetectedResult
+import com.paypal.visualcart.ui.matching.resolveManualRefinedMatch
+import com.paypal.visualcart.ui.matching.sonyDemoDetectedResult
 import com.paypal.visualcart.ui.onboarding.OnboardingScreen
 import com.paypal.visualcart.ui.settings.SettingsScreen
 import kotlinx.coroutines.Dispatchers
@@ -50,15 +53,16 @@ fun MainNavigation(
     // Observe incoming capture events (Circle to Search shares, screenshot picker, URLs)
     LaunchedEffect(Unit) {
         CaptureEventBus.events.collect { event ->
+            if (!CaptureEventBus.markConsumed(event.eventId)) {
+                return@collect
+            }
             when (event) {
                 is CaptureIntentEvent.ShowProductMatch -> {
                     currentMatchResult = event.result
                     showMatchingSheet = true
                 }
                 is CaptureIntentEvent.TriggerCapture -> {
-                    if (event.captureType == "screenshot") {
-                        onLaunchPhotoPicker()
-                    }
+                    // MainActivity.ACTION_CAPTURE already launches the single Photo Picker instance.
                 }
                 is CaptureIntentEvent.OpenCart -> {
                     backStack.add(CartNavKey)
@@ -86,6 +90,14 @@ fun MainNavigation(
                         onNavigateToSettings = { backStack.add(SettingsNavKey) },
                         onProductDetected = {
                             currentMatchResult = defaultDetectedResult()
+                            showMatchingSheet = true
+                        },
+                        onDemoScan = { preset ->
+                            currentMatchResult = if (preset == "sony") {
+                                sonyDemoDetectedResult()
+                            } else {
+                                defaultDetectedResult()
+                            }
                             showMatchingSheet = true
                         }
                     )
@@ -116,39 +128,60 @@ fun MainNavigation(
             }
         )
 
-        if (showMatchingSheet) {
-            val match = currentMatchResult ?: defaultDetectedResult()
+        val activeMatch = currentMatchResult
+        if (showMatchingSheet && activeMatch != null) {
             ProductMatchingBottomSheet(
-                detectedMatch = match,
+                detectedMatch = activeMatch,
                 onDismiss = {
                     showMatchingSheet = false
                     currentMatchResult = null
                 },
+                onRefineQuery = { refinedQuery ->
+                    scope.launch {
+                        val updated = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            resolveManualRefinedMatch(refinedQuery, activeMatch.imageUri)
+                        }
+                        currentMatchResult = updated
+                    }
+                },
+                onRetryRecognition = {
+                    showMatchingSheet = false
+                    currentMatchResult = null
+                    onLaunchPhotoPicker()
+                },
                 onAddToCart = { selectedItem: MerchantListingItem ->
                     scope.launch(Dispatchers.IO) {
-                        val listings = match.listings.map { item ->
+                        val deduped = activeMatch.listings.distinctBy {
+                            SearchQueryBuilder.normalizeMerchantKey(it.merchantName)
+                        }
+                        val listings = deduped.map { item ->
                             MerchantListingEntity(
                                 savedProductId = "",
                                 merchant = item.merchantName,
-                                title = match.detectedTitle,
-                                price = item.price,
-                                currency = "INR",
+                                title = activeMatch.detectedTitle,
+                                price = if (item.hasVerifiedPrice) item.price else null,
+                                currency = item.currency,
                                 productUrl = item.productUrl,
                                 matchType = item.matchType.name,
                                 confidence = item.confidence,
-                                availability = "IN_STOCK",
-                                sourceType = "DEMO",
+                                availability = if (item.hasVerifiedPrice) "IN_STOCK" else "UNKNOWN",
+                                sourceType = item.sourceType.name,
+                                listingOrigin = item.listingOrigin.name,
                                 lastVerifiedAt = System.currentTimeMillis(),
-                                isSelectedForPurchase = item == selectedItem
+                                isSelectedForPurchase = SearchQueryBuilder.normalizeMerchantKey(item.merchantName) ==
+                                    SearchQueryBuilder.normalizeMerchantKey(selectedItem.merchantName)
                             )
                         }
 
                         cartRepository.saveProductWithListings(
-                            title = match.detectedTitle,
-                            brand = match.brand,
-                            category = match.category,
-                            imageUri = null,
+                            title = activeMatch.detectedTitle,
+                            brand = activeMatch.brand,
+                            category = activeMatch.category,
+                            imageUri = activeMatch.imageUri,
                             originalSource = selectedItem.productUrl,
+                            canonicalProductId = com.paypal.visualcart.feature.merchant.SearchQueryBuilder.normalizeProductIdentityKey(
+                                activeMatch.detectedTitle
+                            ),
                             listings = listings
                         )
                     }
@@ -156,10 +189,48 @@ fun MainNavigation(
                     currentMatchResult = null
                     backStack.add(CartNavKey)
                 },
-                onCompare = { id ->
-                    showMatchingSheet = false
-                    currentMatchResult = null
-                    backStack.add(ProductDetailNavKey(id))
+                onCompare = { canonicalFallbackId ->
+                    scope.launch {
+                        val targetId = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            if (activeMatch.listings.isNotEmpty()) {
+                                val deduped = activeMatch.listings.distinctBy {
+                                    SearchQueryBuilder.normalizeMerchantKey(it.merchantName)
+                                }
+                                val listings = deduped.mapIndexed { idx, item ->
+                                    MerchantListingEntity(
+                                        savedProductId = "",
+                                        merchant = item.merchantName,
+                                        title = activeMatch.detectedTitle,
+                                        price = if (item.hasVerifiedPrice) item.price else null,
+                                        currency = item.currency,
+                                        productUrl = item.productUrl,
+                                        matchType = item.matchType.name,
+                                        confidence = item.confidence,
+                                        availability = if (item.hasVerifiedPrice) "IN_STOCK" else "UNKNOWN",
+                                        sourceType = item.sourceType.name,
+                                        listingOrigin = item.listingOrigin.name,
+                                        lastVerifiedAt = System.currentTimeMillis(),
+                                        isSelectedForPurchase = idx == 0
+                                    )
+                                }
+                                val saved = cartRepository.saveProductWithListings(
+                                    title = activeMatch.detectedTitle,
+                                    brand = activeMatch.brand,
+                                    category = activeMatch.category,
+                                    imageUri = activeMatch.imageUri,
+                                    originalSource = deduped.firstOrNull()?.productUrl,
+                                    canonicalProductId = canonicalFallbackId,
+                                    listings = listings
+                                )
+                                saved.product.id
+                            } else {
+                                canonicalFallbackId
+                            }
+                        }
+                        showMatchingSheet = false
+                        currentMatchResult = null
+                        backStack.add(ProductDetailNavKey(targetId))
+                    }
                 }
             )
         }

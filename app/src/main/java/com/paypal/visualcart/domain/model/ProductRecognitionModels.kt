@@ -2,6 +2,28 @@ package com.paypal.visualcart.domain.model
 
 // MatchType is declared in MerchantModels.kt in this package
 
+enum class RecognitionStatus {
+    IDENTIFIED,
+    PARTIAL,
+    UNIDENTIFIED
+}
+
+enum class RecognitionSource {
+    LIVE_AI,
+    DEMO,
+    FALLBACK
+}
+
+data class RecognizedProductCandidate(
+    val brand: String? = null,
+    val title: String,
+    val category: String,
+    val model: String? = null,
+    val colour: String? = null,
+    val specifications: Map<String, String> = emptyMap(),
+    val searchQuery: String = "",
+    val confidence: Float = 0.0f
+)
 
 /**
  * Represents a structured product recognized from image, screen capture, OCR, or text.
@@ -20,12 +42,41 @@ data class RecognizedProduct(
     val isDemoFixture: Boolean = false,
     val isLiveInference: Boolean = false,
     val colour: String? = null,
-    val model: String? = null
-)
+    val model: String? = null,
+    val status: RecognitionStatus = if (
+        title.equals("Unidentified Product", ignoreCase = true) ||
+        category.equals("Unidentified", ignoreCase = true)
+    ) {
+        RecognitionStatus.UNIDENTIFIED
+    } else {
+        RecognitionStatus.IDENTIFIED
+    },
+    val recognitionSource: RecognitionSource = when {
+        isLiveInference -> RecognitionSource.LIVE_AI
+        isDemoFixture -> RecognitionSource.DEMO
+        else -> RecognitionSource.FALLBACK
+    },
+    val searchQuery: String = "",
+    val aiModelName: String? = null,
+    val candidates: List<RecognizedProductCandidate> = emptyList(),
+    val diagnosticNote: String? = null
+) {
+    val isIdentified: Boolean
+        get() = status == RecognitionStatus.IDENTIFIED
+
+    val isPartial: Boolean
+        get() = status == RecognitionStatus.PARTIAL
+
+    val isUnidentified: Boolean
+        get() = status == RecognitionStatus.UNIDENTIFIED
+
+    val hasMultipleCandidates: Boolean
+        get() = candidates.size > 1
+}
 
 /**
  * Structured product recognition schema returned by multimodal AI providers
- * (Gemini 1.5 Flash and backend proxy gateway).
+ * (Gemini multimodal models and backend proxy gateway).
  */
 data class StructuredAiProduct(
     val brand: String?,
@@ -37,7 +88,24 @@ data class StructuredAiProduct(
     val confidence: Float = 0.9f,
     val matchReason: String = "",
     val isDemoFixture: Boolean = false,
-    val isLiveInference: Boolean = !isDemoFixture
+    val isLiveInference: Boolean = !isDemoFixture,
+    val status: RecognitionStatus = if (
+        productName.equals("Unidentified Product", ignoreCase = true) ||
+        category.equals("Unidentified", ignoreCase = true)
+    ) {
+        RecognitionStatus.UNIDENTIFIED
+    } else {
+        RecognitionStatus.IDENTIFIED
+    },
+    val recognitionSource: RecognitionSource = when {
+        isDemoFixture -> RecognitionSource.DEMO
+        isLiveInference -> RecognitionSource.LIVE_AI
+        else -> RecognitionSource.FALLBACK
+    },
+    val searchQuery: String = "",
+    val aiModelName: String? = null,
+    val candidates: List<RecognizedProductCandidate> = emptyList(),
+    val diagnosticNote: String? = null
 )
 
 /**

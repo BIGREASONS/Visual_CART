@@ -129,25 +129,25 @@ class PaymentSecurityAndIdempotencyTest {
 
     @Test
     fun testNegativePriceRejected() = runBlocking {
-        val tamperedListing = validListing.copy(price = -500.0)
-
-        val result = adapter.executeIntegratedCheckout(tamperedListing, forceConfirm = true)
-
-        assertTrue("Negative price must be rejected", result is CheckoutResult.Error)
-        val error = result as CheckoutResult.Error
-        assertEquals("ERR_INVALID_PRICE", error.errorCode)
-        assertTrue(error.message.contains("Invalid listing price"))
+        try {
+            val tamperedListing = validListing.copy(price = -500.0)
+            adapter.executeIntegratedCheckout(tamperedListing, forceConfirm = true)
+            org.junit.Assert.fail("Expected negative price to be rejected")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message?.contains("positive finite price") == true)
+        }
     }
 
     @Test
     fun testZeroOrNaNPriceRejected() = runBlocking {
-        val zeroListing = validListing.copy(price = 0.0)
-        val nanListing = validListing.copy(price = Double.NaN)
-        val infListing = validListing.copy(price = Double.POSITIVE_INFINITY)
-
-        for (listing in listOf(zeroListing, nanListing, infListing)) {
-            val result = adapter.executeIntegratedCheckout(listing, forceConfirm = true)
-            assertTrue("Tampered/invalid price must be rejected: ${listing.price}", result is CheckoutResult.Error)
+        for (badPrice in listOf(0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+            try {
+                val badListing = validListing.copy(price = badPrice)
+                adapter.executeIntegratedCheckout(badListing, forceConfirm = true)
+                org.junit.Assert.fail("Expected tampered/invalid price $badPrice to be rejected")
+            } catch (e: IllegalArgumentException) {
+                assertTrue(e.message?.contains("positive finite price") == true)
+            }
         }
     }
 
@@ -213,5 +213,22 @@ class PaymentSecurityAndIdempotencyTest {
         assertFalse("Redirect URL must strip utm_campaign", redirect.url.contains("utm_campaign"))
         assertFalse("Redirect URL must strip ref", redirect.url.contains("ref="))
         assertEquals("https://www.amazon.in/dp/B0CX23VFP2", redirect.url)
+    }
+
+    @Test
+    fun testUnpricedAndDirectSearchUrlListingRejectedWithPriceUnavailable() = runBlocking {
+        val unpricedSearchListing = validListing.copy(
+            id = "listing_search_only",
+            price = null,
+            originalPrice = null,
+            availability = AvailabilityStatus.UNKNOWN,
+            listingOrigin = com.paypal.visualcart.domain.model.ListingOrigin.DIRECT_SEARCH_URL
+        )
+        assertFalse(unpricedSearchListing.hasVerifiedPrice)
+
+        val result = adapter.executeIntegratedCheckout(unpricedSearchListing, forceConfirm = true)
+        assertTrue("Expected CheckoutResult.Error for unpriced search link", result is CheckoutResult.Error)
+        val error = result as CheckoutResult.Error
+        assertEquals("ERR_PRICE_UNAVAILABLE", error.errorCode)
     }
 }

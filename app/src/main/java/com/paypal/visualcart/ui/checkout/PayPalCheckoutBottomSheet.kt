@@ -738,10 +738,11 @@ private fun CheckoutFailureView(
 
         Spacer(modifier = Modifier.height(18.dp))
 
-        if (onCheckoutInUsd != null && state.originalListing != null) {
+        val inrPrice = state.originalListing?.price?.takeIf { it > 0.0 }
+        if (onCheckoutInUsd != null && inrPrice != null) {
             val previewUsd = kotlin.math.max(
                 0.01,
-                Math.round(state.originalListing.price * PayPalCheckoutCoordinator.DEFAULT_INR_TO_USD_RATE * 100.0) / 100.0
+                Math.round(inrPrice * PayPalCheckoutCoordinator.DEFAULT_INR_TO_USD_RATE * 100.0) / 100.0
             )
             VisualCartButton(
                 text = "Checkout in USD (~${PayPalCheckoutCoordinator.formatAmount(previewUsd, "USD")} USD)",

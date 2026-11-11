@@ -62,29 +62,26 @@ class AmazonIndiaAdapter(
         query: String,
         targetSpecs: Map<String, String>
     ): List<MerchantListing> {
+        val canonicalQuery = com.paypal.visualcart.feature.merchant.SearchQueryBuilder
+            .buildFromRawQuery(query)
+            .validQueryOrNull ?: return emptyList()
+
         if (isLiveMode) {
-            val live = DemoMerchantFixtures.createLiveListing(
-                merchantId = merchantId,
-                merchantName = merchantName,
-                merchantDomain = domain,
-                title = "$query (Amazon India Live API)",
-                price = 5999.0,
-                originalPrice = 9999.0,
-                productUrl = buildSearchUrl(query),
-                deliveryEstimate = "Free Next-Day Delivery by Prime",
-                sellerName = "Amazon Retail India"
-            )
-            return listOf(live)
+            return listOf(buildDirectSearchListing(canonicalQuery))
         }
 
         val listing = DemoMerchantFixtures.findDemoListing(
             merchantId = merchantId,
             merchantName = merchantName,
             merchantDomain = domain,
-            query = query,
+            query = canonicalQuery,
             searchUrlBuilder = ::buildSearchUrl
         )
 
-        return if (listing != null) listOf(listing) else emptyList()
+        return when {
+            listing != null -> listOf(listing)
+            DemoMerchantFixtures.hasCatalogMatch(canonicalQuery) -> emptyList()
+            else -> listOf(buildDirectSearchListing(canonicalQuery))
+        }
     }
 }

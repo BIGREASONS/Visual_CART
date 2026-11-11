@@ -285,7 +285,8 @@ object SecurityUtils {
 
     /**
      * Validates incoming Android Content URIs (e.g. from ACTION_SEND or ACTION_SEND_MULTIPLE).
-     * Must use the 'content' scheme, have a non-empty authority, and contain no path traversal sequences.
+     * Must use the 'content' scheme, have a non-empty authority (including Android multi-user
+     * authorities such as `0@media`), and contain no path traversal sequences or control characters.
      */
     fun isValidContentUri(uriString: String?): Boolean {
         if (uriString.isNullOrBlank()) return false
@@ -301,32 +302,55 @@ object SecurityUtils {
             return false
         }
 
-        // Path traversal rejection
-        if (PATH_TRAVERSAL_PATTERN.matcher(trimmed).find()) {
+        // Path traversal rejection (including URL-encoded and mixed slash variants)
+        val decodedLower = try {
+            URLDecoder.decode(trimmed, StandardCharsets.UTF_8.name()).lowercase(Locale.ROOT)
+        } catch (_: Exception) {
+            trimmed.lowercase(Locale.ROOT)
+        }
+        if (PATH_TRAVERSAL_PATTERN.matcher(trimmed).find() ||
+            decodedLower.contains("../") ||
+            decodedLower.contains("..\\")
+        ) {
             return false
         }
 
-        return try {
-            val uri = URI(trimmed)
-            if (uri.scheme?.lowercase(Locale.ROOT) != "content") {
+        val afterScheme = trimmed.substring("content://".length)
+        if (afterScheme.isBlank()) return false
+
+        // Extract raw authority before '/', '?', or '#' without relying on strict java.net.URI path escaping
+        val rawAuthority = afterScheme
+            .substringBefore("/")
+            .substringBefore("?")
+            .substringBefore("#")
+            .trim()
+        if (rawAuthority.isBlank()) return false
+
+        // Support optional Android userId prefix (e.g., 0@media, 10@com.android.providers.media.documents)
+        val authorityHost = if (rawAuthority.contains("@")) {
+            val userPart = rawAuthority.substringBefore("@")
+            val hostPart = rawAuthority.substringAfter("@")
+            if (userPart.isEmpty() || !userPart.all { it.isDigit() } || hostPart.isBlank()) {
                 return false
             }
-
-            val authority = uri.authority
-            if (authority.isNullOrBlank()) {
-                return false
-            }
-
-            // Authority must contain valid package or provider name chars
-            val validAuthPattern = Pattern.compile("^[a-zA-Z0-9_.-]+$")
-            if (!validAuthPattern.matcher(authority).matches()) {
-                return false
-            }
-
-            true
-        } catch (_: Exception) {
-            false
+            hostPart
+        } else {
+            rawAuthority
         }
+
+        // Must not embed credentials / port / invalid characters in provider authority
+        val validAuthPattern = Pattern.compile("^[a-zA-Z0-9_.-]+$")
+        if (!validAuthPattern.matcher(authorityHost).matches()) {
+            return false
+        }
+
+        // Require either a non-empty path segment after the authority, or just a valid authority with subpath
+        val remainder = afterScheme.substring(rawAuthority.length)
+        if (remainder.isNotEmpty() && !remainder.startsWith("/") && !remainder.startsWith("?") && !remainder.startsWith("#")) {
+            return false
+        }
+
+        return true
     }
 
     /**

@@ -23,13 +23,14 @@ import com.paypal.visualcart.core.designsystem.VisualCartTheme
 import com.paypal.visualcart.core.util.SafeImageDecoder
 import com.paypal.visualcart.core.util.SecurityUtils
 import com.paypal.visualcart.core.util.SharingShortcutsManager
+import com.paypal.visualcart.domain.model.MerchantComparisonSummary
 import com.paypal.visualcart.domain.model.MerchantListing
+import com.paypal.visualcart.domain.model.RecognitionSource
+import com.paypal.visualcart.domain.model.RecognitionStatus
 import com.paypal.visualcart.feature.ai.CloudProductUnderstandingProvider
-import com.paypal.visualcart.feature.ai.DemoProductRecognitionProvider
-import com.paypal.visualcart.feature.ai.LocalProductParser
-import com.paypal.visualcart.feature.merchant.DemoMerchantFixtures
 import com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine
 import com.paypal.visualcart.feature.merchant.ProductUrlExtractor
+import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
 import com.paypal.visualcart.feature.payment.PayPalCheckoutCoordinator
 import com.paypal.visualcart.feature.payment.PayPalDeepLinkHandler
 import com.paypal.visualcart.service.overlay.VisualCartOverlayService
@@ -43,7 +44,12 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
 
     private val demoAiProvider = CloudProductUnderstandingProvider.forBackend()
-    private val merchantDiscoveryEngine = MerchantDiscoveryEngine()
+    private val liveMerchantDiscoveryEngine = MerchantDiscoveryEngine(
+        MerchantDiscoveryEngine.defaultProviders().onEach { it.isLiveMode = true }
+    )
+    private val demoMerchantDiscoveryEngine = MerchantDiscoveryEngine(
+        MerchantDiscoveryEngine.defaultProviders().onEach { it.isLiveMode = false }
+    )
     private val urlExtractor = ProductUrlExtractor()
 
     private val overlayPermissionLauncher = registerForActivityResult(
@@ -158,22 +164,25 @@ class MainActivity : ComponentActivity() {
             }
             Intent.ACTION_SEND -> {
                 val type = intent.type ?: ""
-                when {
-                    type.startsWith("image/") -> {
-                        val imageUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                        } else {
-                            @Suppress("DEPRECATION")
-                            intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-                        } ?: intent.clipData?.getItemAt(0)?.uri
+                val extraStream = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                } ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
 
-                        if (imageUri != null && SecurityUtils.isValidContentUri(imageUri.toString())) {
-                            processSharedImage(imageUri)
+                val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+                    ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
+
+                when {
+                    type.startsWith("image/") || ((type == "*/*" || type.isBlank()) && extraStream != null) -> {
+                        if (extraStream != null && SecurityUtils.isValidContentUri(extraStream.toString())) {
+                            processSharedImage(extraStream)
+                        } else {
+                            Log.w("VisualCartCapture", "MainActivity ignored invalid image stream uri")
                         }
                     }
-                    type.startsWith("text/") || type.isEmpty() -> {
-                        val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
-                            ?: intent.clipData?.getItemAt(0)?.text?.toString()
+                    type.startsWith("text/") || type.isEmpty() || type == "*/*" -> {
                         if (!sharedText.isNullOrBlank()) {
                             processSharedText(sharedText)
                         }
@@ -187,7 +196,8 @@ class MainActivity : ComponentActivity() {
                     @Suppress("DEPRECATION")
                     intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
                 }
-                val firstUri = imageUris?.firstOrNull() ?: intent.clipData?.getItemAt(0)?.uri
+                val firstUri = imageUris?.firstOrNull()
+                    ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
                 if (firstUri != null && SecurityUtils.isValidContentUri(firstUri.toString())) {
                     processSharedImage(firstUri)
                 }
@@ -206,43 +216,91 @@ class MainActivity : ComponentActivity() {
 
     private fun processSharedImage(imageUri: Uri) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val cachedFile = SafeImageDecoder.copyUriToPrivateCache(this@MainActivity, imageUri)
-            val resolvedUri = cachedFile?.absolutePath ?: imageUri.toString()
-
-            // Visual product extraction: query backend multimodal proxy, demo fixtures, or local parser
-            val recognized = demoAiProvider.recognizeFromImage(resolvedUri)
-            val isUnidentified = recognized.title.equals("Unidentified Product", ignoreCase = true) ||
-                recognized.category.equals("Unidentified", ignoreCase = true) ||
-                DemoProductRecognitionProvider.isGenericCaptureText(recognized.title)
-
-            val listings = if (isUnidentified) {
-                emptyList()
-            } else {
-                merchantDiscoveryEngine.searchAll(recognized.title, recognized.specifications)
-                    .distinctBy { it.id }
+            val captureResult = SafeImageDecoder.copyUriToPrivateCacheDetailed(this@MainActivity, imageUri)
+            if (captureResult == null || !captureResult.file.exists() || captureResult.byteSize <= 0L) {
+                Log.w("VisualCartCapture", "MainActivity failed to read shared image scheme=${imageUri.scheme}")
+                val failedResult = DetectedProductMatchResult(
+                    detectedTitle = "Unidentified Image (Unreadable File)",
+                    brand = "Needs Query",
+                    category = "Unidentified",
+                    specs = emptyList(),
+                    matchReason = "Could not read original image bytes cleanly. Pick a local photo or share again.",
+                    listings = emptyList(),
+                    isDemoFixture = false,
+                    isLiveInference = false,
+                    isUncertain = true,
+                    recognitionStatus = RecognitionStatus.UNIDENTIFIED
+                )
+                withContext(Dispatchers.Main) {
+                    CaptureEventBus.emit(CaptureIntentEvent.ShowProductMatch(failedResult))
+                }
+                return@launch
             }
-            val minPrice = listings.minOfOrNull { it.price }
+
+            Log.i(
+                "VisualCartCapture",
+                "MainActivity copied scheme=${imageUri.scheme} mime=${captureResult.mimeType} bytes=${captureResult.byteSize} dim=${captureResult.width}x${captureResult.height}"
+            )
+
+            val resolvedPath = captureResult.file.absolutePath
+            val recognized = demoAiProvider.recognizeFromImage(resolvedPath)
+            val engine = if (recognized.recognitionSource == RecognitionSource.DEMO && recognized.isDemoFixture) {
+                demoMerchantDiscoveryEngine
+            } else {
+                liveMerchantDiscoveryEngine
+            }
+
+            val queryResult = SearchQueryBuilder.build(SearchQueryBuilder.Input.fromRecognizedProduct(recognized))
+            val isUnidentified = recognized.status == RecognitionStatus.UNIDENTIFIED ||
+                recognized.category.equals("Unidentified", ignoreCase = true) ||
+                queryResult is SearchQueryBuilder.Result.Rejected
+
+            val discovery = if (isUnidentified) null else engine.discoverStructured(recognized)
+            val listings = if (discovery != null) {
+                engine.deduplicateListings(
+                    discovery.exactMatches + discovery.similarAlternatives + discovery.searchLinks
+                )
+            } else {
+                emptyList()
+            }
+            val canonicalQuery = (queryResult as? SearchQueryBuilder.Result.Valid)?.query
+                ?: recognized.searchQuery.ifBlank { recognized.title }
+            val summary = MerchantComparisonSummary.fromListings(canonicalQuery, listings)
 
             val matchResult = DetectedProductMatchResult(
                 detectedTitle = if (isUnidentified) "Unidentified Image (Enter Search Manually)" else recognized.title,
                 brand = recognized.brand ?: if (isUnidentified) "Needs Query" else "Detected Product",
                 category = recognized.category,
                 specs = recognized.specifications.entries.map { "${it.key}: ${it.value}" },
-                matchReason = recognized.matchReason,
+                matchReason = recognized.diagnosticNote ?: recognized.matchReason,
                 listings = listings.map { listing: MerchantListing ->
                     MerchantListingItem(
                         merchantName = listing.merchantName,
-                        price = listing.price,
-                        originalPrice = listing.originalPrice,
+                        price = if (listing.hasVerifiedPrice) listing.price else null,
+                        originalPrice = if (listing.hasVerifiedPrice) listing.originalPrice else null,
+                        currency = listing.currency,
                         matchType = listing.matchType,
                         confidence = listing.confidence,
                         productUrl = listing.productUrl,
-                        isLowestPrice = minPrice != null && listing.price == minPrice,
-                        stockNote = if (listing.availability.name == "IN_STOCK") "In Stock" else "Check Merchant"
+                        listingOrigin = listing.listingOrigin,
+                        sourceType = listing.sourceType,
+                        isLowestPrice = (summary?.hasComparableBestPrice == true) &&
+                            listing.hasVerifiedPrice &&
+                            listing.normalizedMerchantId == summary.lowestPriceListing?.normalizedMerchantId,
+                        stockNote = when {
+                            listing.hasVerifiedPrice && listing.availability.name == "IN_STOCK" -> "In Stock"
+                            listing.hasVerifiedPrice -> "Check Merchant"
+                            else -> "Open search results"
+                        }
                     )
                 },
                 isDemoFixture = recognized.isDemoFixture,
-                isLiveInference = recognized.isLiveInference
+                isLiveInference = recognized.isLiveInference,
+                imageUri = resolvedPath,
+                isUncertain = isUnidentified || recognized.status != RecognitionStatus.IDENTIFIED || recognized.candidates.size > 1,
+                recognitionStatus = recognized.status,
+                candidates = recognized.candidates,
+                searchQuery = canonicalQuery
             )
 
             withContext(Dispatchers.Main) {
@@ -263,31 +321,68 @@ class MainActivity : ComponentActivity() {
                 sanitized
             }
 
-            val parsedAttrs = demoAiProvider.recognizeFromText(queryTitle)
-            val listings = merchantDiscoveryEngine.searchAll(parsedAttrs.title, parsedAttrs.specifications)
-                .distinctBy { it.id }
-            val minPrice = listings.minOfOrNull { it.price }
+            val cleanInput = SearchQueryBuilder.buildFromRawQuery(queryTitle)
+            if (cleanInput is SearchQueryBuilder.Result.Rejected) {
+                val rejectedResult = DetectedProductMatchResult(
+                    detectedTitle = "Unidentified Shared Link",
+                    brand = "Needs Query",
+                    category = "Unidentified",
+                    specs = emptyList(),
+                    matchReason = "Could not extract a clean product name from the shared text or link.",
+                    listings = emptyList(),
+                    isDemoFixture = false,
+                    isLiveInference = false,
+                    isUncertain = true,
+                    recognitionStatus = RecognitionStatus.UNIDENTIFIED
+                )
+                withContext(Dispatchers.Main) {
+                    CaptureEventBus.emit(CaptureIntentEvent.ShowProductMatch(rejectedResult))
+                }
+                return@launch
+            }
+
+            val verifiedQuery = (cleanInput as SearchQueryBuilder.Result.Valid).query
+            val parsedAttrs = demoAiProvider.recognizeFromText(verifiedQuery)
+            val engine = if (parsedAttrs.recognitionSource == RecognitionSource.DEMO && parsedAttrs.isDemoFixture) {
+                demoMerchantDiscoveryEngine
+            } else {
+                liveMerchantDiscoveryEngine
+            }
+            val discovery = engine.discoverStructured(parsedAttrs)
+            val listings = engine.deduplicateListings(
+                discovery.exactMatches + discovery.similarAlternatives + discovery.searchLinks
+            )
+            val summary = MerchantComparisonSummary.fromListings(verifiedQuery, listings)
 
             val matchResult = DetectedProductMatchResult(
                 detectedTitle = parsedAttrs.title,
                 brand = parsedAttrs.brand ?: "Product",
                 category = parsedAttrs.category,
                 specs = parsedAttrs.specifications.entries.map { "${it.key}: ${it.value}" },
-                matchReason = "Matched ${listings.size} stores based on shared product details.",
+                matchReason = "Prepared ${listings.size} store matches for \"$verifiedQuery\".",
                 listings = listings.map { listing: MerchantListing ->
                     MerchantListingItem(
                         merchantName = listing.merchantName,
-                        price = listing.price,
-                        originalPrice = listing.originalPrice,
+                        price = if (listing.hasVerifiedPrice) listing.price else null,
+                        originalPrice = if (listing.hasVerifiedPrice) listing.originalPrice else null,
+                        currency = listing.currency,
                         matchType = listing.matchType,
                         confidence = listing.confidence,
                         productUrl = listing.productUrl,
-                        isLowestPrice = minPrice != null && listing.price == minPrice,
-                        stockNote = "In Stock"
+                        listingOrigin = listing.listingOrigin,
+                        sourceType = listing.sourceType,
+                        isLowestPrice = (summary?.hasComparableBestPrice == true) &&
+                            listing.hasVerifiedPrice &&
+                            listing.normalizedMerchantId == summary.lowestPriceListing?.normalizedMerchantId,
+                        stockNote = if (listing.hasVerifiedPrice) "In Stock" else "Open search results"
                     )
                 },
                 isDemoFixture = parsedAttrs.isDemoFixture,
-                isLiveInference = parsedAttrs.isLiveInference
+                isLiveInference = parsedAttrs.isLiveInference,
+                isUncertain = parsedAttrs.status != RecognitionStatus.IDENTIFIED,
+                recognitionStatus = parsedAttrs.status,
+                candidates = parsedAttrs.candidates,
+                searchQuery = verifiedQuery
             )
 
             withContext(Dispatchers.Main) {

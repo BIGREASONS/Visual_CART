@@ -29,7 +29,7 @@ class VisualCartDatabase private constructor(context: Context) : SQLiteOpenHelpe
 
     companion object {
         const val DATABASE_NAME = "visual_cart.db"
-        const val DATABASE_VERSION = 1
+        const val DATABASE_VERSION = 2
 
         @Volatile
         private var INSTANCE: VisualCartDatabase? = null
@@ -83,7 +83,7 @@ class VisualCartDatabase private constructor(context: Context) : SQLiteOpenHelpe
                 saved_product_id TEXT NOT NULL,
                 merchant TEXT NOT NULL,
                 title TEXT NOT NULL,
-                price REAL NOT NULL,
+                price REAL,
                 currency TEXT NOT NULL,
                 product_url TEXT NOT NULL,
                 image_url TEXT,
@@ -91,6 +91,7 @@ class VisualCartDatabase private constructor(context: Context) : SQLiteOpenHelpe
                 confidence REAL NOT NULL,
                 availability TEXT NOT NULL,
                 source_type TEXT NOT NULL,
+                listing_origin TEXT NOT NULL DEFAULT 'VERIFIED_CATALOG_FIXTURE',
                 last_verified_at INTEGER NOT NULL,
                 delivery_estimate TEXT,
                 is_selected INTEGER NOT NULL DEFAULT 1,
@@ -146,9 +147,50 @@ class VisualCartDatabase private constructor(context: Context) : SQLiteOpenHelpe
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Migration strategy
         if (oldVersion < 2) {
-            // Future migration steps
+            // Migrate merchant_listings so price is nullable and listing_origin is persisted
+            db.execSQL(
+                """
+                CREATE TABLE merchant_listings_v2 (
+                    id TEXT PRIMARY KEY,
+                    saved_product_id TEXT NOT NULL,
+                    merchant TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    price REAL,
+                    currency TEXT NOT NULL,
+                    product_url TEXT NOT NULL,
+                    image_url TEXT,
+                    match_type TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    availability TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    listing_origin TEXT NOT NULL DEFAULT 'VERIFIED_CATALOG_FIXTURE',
+                    last_verified_at INTEGER NOT NULL,
+                    delivery_estimate TEXT,
+                    is_selected INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY (saved_product_id) REFERENCES saved_products (id) ON DELETE CASCADE
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                """
+                INSERT INTO merchant_listings_v2 (
+                    id, saved_product_id, merchant, title, price, currency, product_url,
+                    image_url, match_type, confidence, availability, source_type,
+                    listing_origin, last_verified_at, delivery_estimate, is_selected
+                )
+                SELECT
+                    id, saved_product_id, merchant, title,
+                    CASE WHEN price <= 0.0 THEN NULL ELSE price END,
+                    currency, product_url, image_url, match_type, confidence, availability,
+                    source_type,
+                    CASE WHEN price IS NULL OR price <= 0.0 THEN 'DIRECT_SEARCH_URL' ELSE 'VERIFIED_CATALOG_FIXTURE' END,
+                    last_verified_at, delivery_estimate, is_selected
+                FROM merchant_listings
+                """.trimIndent()
+            )
+            db.execSQL("DROP TABLE merchant_listings")
+            db.execSQL("ALTER TABLE merchant_listings_v2 RENAME TO merchant_listings")
         }
     }
 
@@ -308,12 +350,55 @@ class VisualCartDatabase private constructor(context: Context) : SQLiteOpenHelpe
     }
 
     private fun insertListingInternal(db: SQLiteDatabase, listing: MerchantListingEntity): Long {
+        val targetMerchantKey = com.paypal.visualcart.feature.merchant.SearchQueryBuilder.normalizeMerchantKey(listing.merchant)
+        // Deduplicate normalized merchant within the same saved product
+        val existingCursor = db.query(
+            "merchant_listings",
+            arrayOf("id", "merchant"),
+            "saved_product_id = ?",
+            arrayOf(listing.savedProductId),
+            null,
+            null,
+            null
+        )
+        val duplicateIds = mutableListOf<String>()
+        existingCursor.use { c ->
+            while (c.moveToNext()) {
+                val existingId = c.getString(0)
+                val existingMerchant = c.getString(1)
+                if (existingId != listing.id &&
+                    com.paypal.visualcart.feature.merchant.SearchQueryBuilder.normalizeMerchantKey(existingMerchant) == targetMerchantKey
+                ) {
+                    duplicateIds.add(existingId)
+                }
+            }
+        }
+        for (dupId in duplicateIds) {
+            db.delete("merchant_listings", "id = ?", arrayOf(dupId))
+        }
+        if (listing.isSelectedForPurchase) {
+            db.execSQL(
+                "UPDATE merchant_listings SET is_selected = 0 WHERE saved_product_id = ? AND id != ?",
+                arrayOf(listing.savedProductId, listing.id)
+            )
+        }
+
+        val validPrice = listing.price?.takeIf {
+            it > 0.0 &&
+                listing.listingOrigin != "DIRECT_SEARCH_URL" &&
+                listing.listingOrigin != "NO_RESULT"
+        }
+
         val cv = ContentValues().apply {
             put("id", listing.id)
             put("saved_product_id", listing.savedProductId)
             put("merchant", listing.merchant)
             put("title", listing.title)
-            put("price", listing.price)
+            if (validPrice != null) {
+                put("price", validPrice)
+            } else {
+                putNull("price")
+            }
             put("currency", listing.currency)
             put("product_url", listing.productUrl)
             put("image_url", listing.imageUrl)
@@ -321,21 +406,25 @@ class VisualCartDatabase private constructor(context: Context) : SQLiteOpenHelpe
             put("confidence", listing.confidence)
             put("availability", listing.availability)
             put("source_type", listing.sourceType)
+            put("listing_origin", listing.listingOrigin)
             put("last_verified_at", listing.lastVerifiedAt)
             put("delivery_estimate", listing.deliveryEstimate)
             put("is_selected", if (listing.isSelectedForPurchase) 1 else 0)
         }
         val rowId = db.insertWithOnConflict("merchant_listings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
-        // Record initial price observation
-        val obsCv = ContentValues().apply {
-            put("id", java.util.UUID.randomUUID().toString())
-            put("merchant_listing_id", listing.id)
-            put("price", listing.price)
-            put("currency", listing.currency)
-            put("observed_at", listing.lastVerifiedAt)
-            put("source_type", listing.sourceType)
+
+        // Record price observation ONLY for priced listings (never unpriced search URLs)
+        if (validPrice != null) {
+            val obsCv = ContentValues().apply {
+                put("id", java.util.UUID.randomUUID().toString())
+                put("merchant_listing_id", listing.id)
+                put("price", validPrice)
+                put("currency", listing.currency)
+                put("observed_at", listing.lastVerifiedAt)
+                put("source_type", listing.sourceType)
+            }
+            db.insert("price_observations", null, obsCv)
         }
-        db.insert("price_observations", null, obsCv)
         return rowId
     }
 
@@ -352,7 +441,7 @@ class VisualCartDatabase private constructor(context: Context) : SQLiteOpenHelpe
             arrayOf(productId),
             null,
             null,
-            "is_selected DESC, price ASC"
+            "is_selected DESC, CASE WHEN price IS NULL OR price <= 0 THEN 1 ELSE 0 END ASC, price ASC"
         )
         cursor.use { c ->
             while (c.moveToNext()) {
@@ -543,12 +632,22 @@ class VisualCartDatabase private constructor(context: Context) : SQLiteOpenHelpe
     }
 
     private fun cursorToMerchantListing(c: Cursor): MerchantListingEntity {
+        val priceIdx = c.getColumnIndexOrThrow("price")
+        val rawPrice = if (c.isNull(priceIdx)) null else c.getDouble(priceIdx).takeIf { it > 0.0 }
+        val originIdx = c.getColumnIndex("listing_origin")
+        val origin = if (originIdx >= 0 && !c.isNull(originIdx)) {
+            c.getString(originIdx)
+        } else {
+            if (rawPrice == null) "DIRECT_SEARCH_URL" else "VERIFIED_CATALOG_FIXTURE"
+        }
+        val sanitizedPrice = if (origin == "DIRECT_SEARCH_URL" || origin == "NO_RESULT") null else rawPrice
+
         return MerchantListingEntity(
             id = c.getString(c.getColumnIndexOrThrow("id")),
             savedProductId = c.getString(c.getColumnIndexOrThrow("saved_product_id")),
             merchant = c.getString(c.getColumnIndexOrThrow("merchant")),
             title = c.getString(c.getColumnIndexOrThrow("title")),
-            price = c.getDouble(c.getColumnIndexOrThrow("price")),
+            price = sanitizedPrice,
             currency = c.getString(c.getColumnIndexOrThrow("currency")),
             productUrl = c.getString(c.getColumnIndexOrThrow("product_url")),
             imageUrl = c.getString(c.getColumnIndexOrThrow("image_url")),
@@ -556,6 +655,7 @@ class VisualCartDatabase private constructor(context: Context) : SQLiteOpenHelpe
             confidence = c.getFloat(c.getColumnIndexOrThrow("confidence")),
             availability = c.getString(c.getColumnIndexOrThrow("availability")),
             sourceType = c.getString(c.getColumnIndexOrThrow("source_type")),
+            listingOrigin = origin,
             lastVerifiedAt = c.getLong(c.getColumnIndexOrThrow("last_verified_at")),
             deliveryEstimate = c.getString(c.getColumnIndexOrThrow("delivery_estimate")),
             isSelectedForPurchase = c.getInt(c.getColumnIndexOrThrow("is_selected")) == 1

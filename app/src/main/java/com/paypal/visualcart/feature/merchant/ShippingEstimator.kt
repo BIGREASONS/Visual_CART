@@ -1,5 +1,6 @@
 package com.paypal.visualcart.feature.merchant
 
+import com.paypal.visualcart.domain.model.ListingOrigin
 import java.util.Locale
 
 /**
@@ -30,42 +31,80 @@ enum class DeliverySpeedTier {
 }
 
 /**
- * Robust utility for parsing textual shipping descriptions, determining delivery speed,
- * evaluating free shipping qualification, and estimating realistic delivery timelines
- * across the 6 supported merchants (Amazon India, Flipkart, Croma, Reliance Digital, Myntra, Tata CLiQ).
+ * Utility for parsing textual shipping descriptions and evaluating verified shipping policies.
+ * Never fabricates shipping fees or promises for missing prices or direct search URLs.
  */
 object ShippingEstimator {
 
+    fun estimateOrNull(
+        deliveryText: String?,
+        merchantId: String,
+        price: Double?,
+        currency: String = "INR",
+        listingOrigin: ListingOrigin = ListingOrigin.VERIFIED_CATALOG_FIXTURE
+    ): ShippingEstimate? {
+        if (listingOrigin == ListingOrigin.DIRECT_SEARCH_URL ||
+            listingOrigin == ListingOrigin.NO_RESULT ||
+            price == null ||
+            price <= 0.0 ||
+            !price.isFinite()
+        ) {
+            return null
+        }
+
+        val normalizedId = SearchQueryBuilder.normalizeMerchantKey(merchantId)
+        if (!deliveryText.isNullOrBlank()) {
+            val lower = deliveryText.lowercase(Locale.ROOT)
+            if (lower.contains("varies") || lower.contains("check merchant")) {
+                return null
+            }
+            return parseText(deliveryText, price, currency)
+        }
+
+        if (listingOrigin == ListingOrigin.LIVE_API) {
+            // Do not synthesize delivery timelines for live API results when omitted
+            return null
+        }
+
+        return defaultForMerchant(normalizedId, price, currency)
+    }
+
     /**
-     * Parses an existing merchant delivery estimate string, or generates an accurate
-     * estimated timeline for the given [merchantId] and order [price].
+     * Legacy-compatible helper returning verified shipping estimates for priced catalog fixtures.
      */
     fun estimate(
         deliveryText: String?,
         merchantId: String,
         price: Double = 0.0
     ): ShippingEstimate {
-        if (!deliveryText.isNullOrBlank()) {
-            return parseText(deliveryText, price)
-        }
-
-        return defaultForMerchant(merchantId, price)
+        return estimateOrNull(
+            deliveryText = deliveryText,
+            merchantId = merchantId,
+            price = price.takeIf { it > 0.0 },
+            listingOrigin = ListingOrigin.VERIFIED_CATALOG_FIXTURE
+        ) ?: ShippingEstimate(
+            estimateText = "Shipping varies by seller",
+            estimatedDaysMin = 2,
+            estimatedDaysMax = 5,
+            isFreeShipping = false,
+            isFastDelivery = false,
+            shippingFee = 0.0
+        )
     }
 
-    /**
-     * Parses free-form merchant delivery strings into structured [ShippingEstimate].
-     * Handles patterns like:
-     * - "Free Next-Day Delivery by Prime"
-     * - "Delivery by Tomorrow, 2 PM"
-     * - "Standard Delivery in 24 hours"
-     * - "Express Delivery in 3 hours in select cities"
-     * - "Delivery in 2 business days"
-     * - "Delivery in 3-4 days"
-     */
-    fun parseText(text: String, price: Double = 0.0): ShippingEstimate {
+    fun parseText(
+        text: String,
+        price: Double? = null,
+        currency: String = "INR"
+    ): ShippingEstimate {
         val lower = text.lowercase(Locale.ROOT)
+        val isInr = currency.equals("INR", ignoreCase = true)
+        val hasPositivePrice = price != null && price > 0.0
 
-        val isFree = lower.contains("free") || price >= 499.0
+        val explicitFree = lower.contains("free")
+        val thresholdFree = isInr && hasPositivePrice && (price ?: 0.0) >= 499.0
+        val isFree = explicitFree || thresholdFree
+
         val isFast = lower.contains("next-day") ||
             lower.contains("next day") ||
             lower.contains("tomorrow") ||
@@ -87,7 +126,11 @@ object ShippingEstimator {
             else -> Pair(2, 4)
         }
 
-        val fee = if (isFree) 0.0 else 49.0
+        val fee = when {
+            isFree -> 0.0
+            hasPositivePrice && isInr -> 49.0
+            else -> 0.0
+        }
 
         return ShippingEstimate(
             estimateText = text,
@@ -99,13 +142,17 @@ object ShippingEstimator {
         )
     }
 
-    /**
-     * Merchant-specific baseline policies for shipping estimates.
-     */
-    fun defaultForMerchant(merchantId: String, price: Double = 0.0): ShippingEstimate {
-        return when (merchantId.lowercase(Locale.ROOT)) {
+    fun defaultForMerchant(
+        merchantId: String,
+        price: Double = 0.0,
+        currency: String = "INR"
+    ): ShippingEstimate {
+        val normalizedId = SearchQueryBuilder.normalizeMerchantKey(merchantId)
+        val isInr = currency.equals("INR", ignoreCase = true)
+        val hasPrice = price > 0.0
+        return when (normalizedId) {
             "amazon_in" -> {
-                val isFree = price >= 499.0
+                val isFree = !isInr || !hasPrice || price >= 499.0
                 ShippingEstimate(
                     estimateText = if (isFree) "Free Delivery by Tomorrow (Amazon Prime)" else "Standard Delivery in 1-2 days (₹40)",
                     estimatedDaysMin = 1,
@@ -116,7 +163,7 @@ object ShippingEstimator {
                 )
             }
             "flipkart" -> {
-                val isFree = price >= 500.0
+                val isFree = !isInr || !hasPrice || price >= 500.0
                 ShippingEstimate(
                     estimateText = if (isFree) "Free Delivery by Tomorrow, 2 PM (Flipkart Assured)" else "Standard Delivery in 2 days (₹40)",
                     estimatedDaysMin = 1,
@@ -147,7 +194,7 @@ object ShippingEstimator {
                 )
             }
             "myntra" -> {
-                val isFree = price >= 799.0
+                val isFree = !isInr || !hasPrice || price >= 799.0
                 ShippingEstimate(
                     estimateText = if (isFree) "Free Delivery in 2-3 business days" else "Standard Delivery in 2-3 days (₹99)",
                     estimatedDaysMin = 2,
@@ -158,7 +205,7 @@ object ShippingEstimator {
                 )
             }
             "tatacliq" -> {
-                val isFree = price >= 999.0
+                val isFree = !isInr || !hasPrice || price >= 999.0
                 ShippingEstimate(
                     estimateText = if (isFree) "Free Standard Delivery in 3-4 business days" else "Delivery in 3-4 business days (₹49)",
                     estimatedDaysMin = 3,
@@ -169,13 +216,14 @@ object ShippingEstimator {
                 )
             }
             else -> {
+                val isFree = !isInr || !hasPrice || price >= 500.0
                 ShippingEstimate(
                     estimateText = "Standard Delivery in 2-4 business days",
                     estimatedDaysMin = 2,
                     estimatedDaysMax = 4,
-                    isFreeShipping = price >= 500.0,
+                    isFreeShipping = isFree,
                     isFastDelivery = false,
-                    shippingFee = if (price >= 500.0) 0.0 else 50.0
+                    shippingFee = if (isFree) 0.0 else 50.0
                 )
             }
         }

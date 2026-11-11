@@ -1,7 +1,10 @@
 package com.paypal.visualcart.feature.ai
 
 import com.paypal.visualcart.domain.model.MatchType
+import com.paypal.visualcart.domain.model.RecognitionSource
+import com.paypal.visualcart.domain.model.RecognitionStatus
 import com.paypal.visualcart.domain.model.RecognizedProduct
+import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
 import java.util.UUID
 import java.util.regex.Pattern
 
@@ -70,33 +73,72 @@ object LocalProductParser {
      */
     fun parse(rawText: String, imageUrl: String? = null): RecognizedProduct {
         val trimmed = rawText.trim()
+        if (SearchQueryBuilder.isNonProductNoise(trimmed)) {
+            return RecognizedProduct(
+                id = UUID.randomUUID().toString(),
+                title = "Unidentified Product",
+                brand = null,
+                category = "Unidentified",
+                specifications = emptyMap(),
+                confidence = 0.0f,
+                imageUrl = imageUrl,
+                rawTextSnippet = "",
+                matchType = MatchType.SIMILAR,
+                matchReason = "Input contained no recognizable product text (filename, timestamp, or URI rejected).",
+                isDemoFixture = false,
+                isLiveInference = false,
+                status = RecognitionStatus.UNIDENTIFIED,
+                recognitionSource = RecognitionSource.FALLBACK,
+                searchQuery = ""
+            )
+        }
+
         val brand = detectBrand(trimmed)
         val specs = extractSpecifications(trimmed)
         val category = detectCategory(trimmed, specs)
         val cleanTitle = cleanCanonicalTitle(trimmed, brand, specs)
+        val finalTitle = cleanTitle.ifBlank { trimmed }
 
-        // Confidence estimation based on richness of extracted attributes
-        var score = 0.5f
+        val canonicalSearch = SearchQueryBuilder.build(
+            SearchQueryBuilder.Input(
+                productName = finalTitle,
+                brand = brand,
+                category = category,
+                specifications = specs
+            )
+        ).validQueryOrNull.orEmpty()
+
+        val hasMinimalContext = brand == null && specs.isEmpty() && finalTitle.split(Regex("\\s+")).size <= 2
+        var score = if (hasMinimalContext) 0.45f else 0.5f
         if (brand != null) score += 0.2f
         if (specs.isNotEmpty()) score += minOf(0.25f, specs.size * 0.08f)
         if (cleanTitle.isNotBlank()) score += 0.05f
-        val confidence = score.coerceIn(0.1f, 1.0f)
+        val confidence = score.coerceIn(0.1f, 0.95f)
+
+        val status = when {
+            category.equals("Unidentified", ignoreCase = true) || canonicalSearch.isBlank() -> RecognitionStatus.UNIDENTIFIED
+            hasMinimalContext -> RecognitionStatus.PARTIAL
+            else -> RecognitionStatus.IDENTIFIED
+        }
 
         val reason = buildExplanationReason(brand, category, specs)
 
         return RecognizedProduct(
             id = UUID.randomUUID().toString(),
-            title = cleanTitle.ifBlank { trimmed },
+            title = finalTitle,
             brand = brand,
             category = category,
             specifications = specs,
             confidence = confidence,
             imageUrl = imageUrl,
             rawTextSnippet = trimmed.take(200),
-            matchType = MatchType.EXACT,
+            matchType = if (status == RecognitionStatus.IDENTIFIED) MatchType.EXACT else MatchType.SIMILAR,
             matchReason = reason,
             isDemoFixture = false,
-            isLiveInference = false
+            isLiveInference = false,
+            status = status,
+            recognitionSource = RecognitionSource.FALLBACK,
+            searchQuery = canonicalSearch
         )
     }
 
@@ -191,10 +233,12 @@ object LocalProductParser {
             }
         }
 
-        // 5. Display Size
+        // 5. Display Size (skip for industrial pipes/conduit measurements such as "2 inch")
+        val isIndustrialMeasurement = Regex("(?i)\\b(?:pipes?|piping|pvc|upvc|cpvc|hdpe|conduit|valve|tubing)\\b")
+            .containsMatchIn(text)
         val displayRegex = Pattern.compile("(?i)\\b(\\d{1,2}(?:\\.\\d)?)[- ]?(?:inch|\")\\b")
         val displayMatch = displayRegex.matcher(text)
-        if (displayMatch.find()) {
+        if (!isIndustrialMeasurement && displayMatch.find()) {
             specs["display"] = "${displayMatch.group(1)}-inch"
         }
 
@@ -288,13 +332,23 @@ object LocalProductParser {
             return "Home"
         }
 
-        // Default electronics
+        // Industrial Materials & Hardware (Checked BEFORE electronics so metal/PVC pipes never turn into Electronics)
+        if (Regex("(?i)\\b(?:pipes?|piping|pvc|upvc|cpvc|hdpe|steel\\s+pipe|metal\\s+pipe|flange|valve|conduit|rebar|tubing)\\b").containsMatchIn(lower)) {
+            return "Industrial Materials"
+        }
+
+        if (Regex("(?i)\\b(?:wrench|drill|hammer|screwdriver|plywood|lumber|hardware\\s+fitting)\\b").containsMatchIn(lower)) {
+            return "Hardware & Tools"
+        }
+
+        // Default electronics ONLY on clear electronics signals
         if (lower.contains("mouse") || lower.contains("keyboard") || lower.contains("charger") ||
-            lower.contains("usb") || specs.containsKey("sensor") || specs.containsKey("connectivity")) {
+            lower.contains("usb") || specs.containsKey("sensor") || specs.containsKey("connectivity")
+        ) {
             return "Electronics"
         }
 
-        return "General"
+        return if (SearchQueryBuilder.isNonProductNoise(text)) "Unidentified" else "Other"
     }
 
     /**

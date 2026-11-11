@@ -382,4 +382,105 @@ class MultimodalProductUnderstandingTest {
         assertTrue(product.isLiveInference)
         assertFalse(product.isDemoFixture)
     }
+
+    @Test
+    fun testPartialMultiCandidateAndUnidentifiedStructuredParsing() {
+        val partialJson = """
+            {
+              "status": "PARTIAL",
+              "brand": null,
+              "product_name": "Galvanized Metal Pipes",
+              "category": "Industrial Materials",
+              "search_query": "metal pipes",
+              "specifications": {
+                "Material": "Uncertain from image alone",
+                "Specifications": "Not verified"
+              },
+              "candidates": [
+                {
+                  "title": "Galvanized Steel Pipe",
+                  "category": "Industrial Materials",
+                  "search_query": "galvanized steel pipe",
+                  "confidence": 0.61
+                },
+                {
+                  "title": "Rigid PVC Conduit Pipe",
+                  "category": "Industrial Materials",
+                  "search_query": "pvc conduit pipe",
+                  "confidence": 0.54
+                }
+              ],
+              "confidence": 0.61,
+              "match_reason": "Visible hollow cylindrical pipes; material uncertain."
+            }
+        """.trimIndent()
+
+        val provider = CloudProductUnderstandingProvider()
+        val parsedPartial = provider.parseStructuredProduct(partialJson)
+        assertNotNull(parsedPartial)
+        assertEquals(com.paypal.visualcart.domain.model.RecognitionStatus.PARTIAL, parsedPartial?.status)
+        assertEquals("Industrial Materials", parsedPartial?.category)
+        assertEquals(2, parsedPartial?.candidates?.size)
+        assertEquals("Uncertain from image alone", parsedPartial?.specifications?.get("Material"))
+
+        val unidentifiedJson = """
+            {
+              "status": "UNIDENTIFIED",
+              "brand": null,
+              "product_name": "Unidentified Product",
+              "category": "Unidentified",
+              "search_query": "shared image.jpg",
+              "confidence": 0.12,
+              "match_reason": "Blurry image without identifiable item"
+            }
+        """.trimIndent()
+        val parsedUnknown = provider.parseStructuredProduct(unidentifiedJson)
+        assertNotNull(parsedUnknown)
+        assertEquals(com.paypal.visualcart.domain.model.RecognitionStatus.UNIDENTIFIED, parsedUnknown?.status)
+    }
+
+    @Test
+    fun testRecognizeFromRealTempPngFileForwardsActualBytesAndSniffedMime() = runBlocking {
+        val pngBytes = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        )
+        val tempFile = java.io.File.createTempFile("real_capture_", ".tmp").apply {
+            writeBytes(pngBytes)
+        }
+        try {
+            var capturedBody: String? = null
+            val mockTransport = NetworkTransport { _, _, body ->
+                capturedBody = body
+                NetworkResponse(
+                    statusCode = 200,
+                    body = """
+                        {
+                          "status": "PARTIAL",
+                          "brand": null,
+                          "product_name": "Industrial Metal Pipes",
+                          "category": "Industrial Materials",
+                          "search_query": "metal pipes",
+                          "specifications": {"Material": "Uncertain from image alone"},
+                          "confidence": 0.65,
+                          "match_reason": "Inspecting real PNG binary bytes."
+                        }
+                    """.trimIndent()
+                )
+            }
+            val provider = CloudProductUnderstandingProvider(
+                endpointUrl = "http://127.0.0.1:8000/api/v1/ai/recognize-product",
+                networkTransport = mockTransport
+            )
+            val result = provider.recognizeFromImage(tempFile.absolutePath, contextText = "shared image.jpg")
+            assertNotNull(capturedBody)
+            assertTrue("Expected image/png sniffed MIME in request", capturedBody!!.contains("\"mime_type\":\"image/png\""))
+            val expectedB64 = java.util.Base64.getEncoder().encodeToString(pngBytes)
+            assertTrue("Expected exact image_base64 bytes forwarded", capturedBody!!.contains(expectedB64))
+            assertFalse("Generic filename hint must never be forwarded", capturedBody!!.contains("shared image.jpg"))
+            assertEquals("Industrial Materials", result.category)
+            assertTrue(result.isLiveInference)
+        } finally {
+            tempFile.delete()
+        }
+    }
 }

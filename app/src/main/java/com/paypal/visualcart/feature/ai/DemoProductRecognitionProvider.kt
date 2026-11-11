@@ -2,7 +2,10 @@ package com.paypal.visualcart.feature.ai
 
 import com.paypal.visualcart.domain.model.MatchResult
 import com.paypal.visualcart.domain.model.MatchType
+import com.paypal.visualcart.domain.model.RecognitionSource
+import com.paypal.visualcart.domain.model.RecognitionStatus
 import com.paypal.visualcart.domain.model.RecognizedProduct
+import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
 
 /**
  * Demo and local AI product recognition provider offering realistic high-fidelity
@@ -16,24 +19,8 @@ class DemoProductRecognitionProvider(
     companion object {
         const val PROVIDER_NAME = "PayPal Demo & On-Device AI Provider"
 
-        private val GENERIC_CAPTURE_REGEX = Regex(
-            "^(shared[-_\\s]?image(?:[-_\\s()]*\\d+)*|share[-_\\s]?[\\d_-]+|img[-_\\s]?[\\d_-]+|pxl[-_\\s]?[\\d_-]+|screenshot.*|photo[-_\\s]?[\\d_-]+|media[-_\\s]?[\\d_-]+|image|photo|picture|shared product|[\\d_-]+)(\\.(jpe?g|png|webp|gif|bmp|heic|heif))?$",
-            RegexOption.IGNORE_CASE
-        )
-        private val IMAGE_EXT_REGEX = Regex("^.*\\.(jpe?g|png|webp|gif|bmp|heic|heif)$", RegexOption.IGNORE_CASE)
-
         fun isGenericCaptureText(raw: String?): Boolean {
-            val cleaned = raw?.trim().orEmpty()
-            if (cleaned.isBlank()) return true
-            if (cleaned.startsWith("content://", ignoreCase = true) || cleaned.startsWith("file://", ignoreCase = true)) {
-                return true
-            }
-            if (GENERIC_CAPTURE_REGEX.matches(cleaned)) return true
-            if (IMAGE_EXT_REGEX.matches(cleaned)) {
-                val stem = cleaned.substringBeforeLast(".")
-                if (stem.isBlank() || GENERIC_CAPTURE_REGEX.matches(stem)) return true
-            }
-            return false
+            return SearchQueryBuilder.isNonProductNoise(raw)
         }
 
         val FIXTURE_SAMSUNG_SSD = RecognizedProduct(
@@ -186,50 +173,64 @@ class DemoProductRecognitionProvider(
     fun getDemoFixtures(): List<RecognizedProduct> = ALL_FIXTURES
 
     override suspend fun recognizeFromText(text: String): RecognizedProduct {
-        val matchedFixture = findDemoFixture(text)
-        if (matchedFixture != null) {
-            return matchedFixture
+        if (!SearchQueryBuilder.isNonProductNoise(text)) {
+            val matchedFixture = findDemoFixture(text)
+            if (matchedFixture != null) {
+                return matchedFixture.copy(
+                    status = RecognitionStatus.IDENTIFIED,
+                    recognitionSource = RecognitionSource.DEMO,
+                    searchQuery = SearchQueryBuilder.build(
+                        SearchQueryBuilder.Input.fromRecognizedProduct(matchedFixture)
+                    ).validQueryOrNull ?: matchedFixture.title
+                )
+            }
         }
         return localParser.parse(text)
     }
 
     override suspend fun recognizeFromImage(imageUri: String, contextText: String?): RecognizedProduct {
-        val combinedQuery = "${imageUri.lowercase()} ${contextText ?: ""}".trim()
-        val matchedFixture = findDemoFixture(combinedQuery)
-        if (matchedFixture != null) {
-            return matchedFixture.copy(
-                imageUrl = if (imageUri.startsWith("http") || imageUri.startsWith("content") || imageUri.startsWith("file")) {
-                    imageUri
-                } else {
-                    matchedFixture.imageUrl
-                }
+        // Strictly ignore raw filenames, timestamps, URIs, and cache paths in imageUri or contextText.
+        val cleanHint = contextText?.trim()?.takeIf { !isGenericCaptureText(it) }
+
+        if (!cleanHint.isNullOrBlank()) {
+            val matchedFixture = findDemoFixture(cleanHint)
+            if (matchedFixture != null) {
+                return matchedFixture.copy(
+                    imageUrl = if (imageUri.startsWith("http") || imageUri.startsWith("content") || imageUri.startsWith("file")) {
+                        imageUri
+                    } else {
+                        matchedFixture.imageUrl
+                    },
+                    status = RecognitionStatus.IDENTIFIED,
+                    recognitionSource = RecognitionSource.DEMO,
+                    searchQuery = SearchQueryBuilder.build(
+                        SearchQueryBuilder.Input.fromRecognizedProduct(matchedFixture)
+                    ).validQueryOrNull ?: matchedFixture.title
+                )
+            }
+            return localParser.parse(
+                rawText = cleanHint,
+                imageUrl = imageUri
             )
         }
 
-        val candidateHint = contextText?.takeIf { !isGenericCaptureText(it) }
-            ?: imageUri.substringAfterLast("/").substringBeforeLast(".")
-                .takeIf { !isGenericCaptureText(it) }
-
-        if (candidateHint.isNullOrBlank()) {
-            return RecognizedProduct(
-                id = "unidentified_${System.currentTimeMillis()}",
-                title = "Unidentified Product",
-                brand = null,
-                category = "Unidentified",
-                specifications = emptyMap(),
-                confidence = 0.10f,
-                imageUrl = imageUri,
-                rawTextSnippet = contextText.orEmpty(),
-                matchType = MatchType.SIMILAR,
-                matchReason = "Image could not be identified offline. Configure GEMINI_API_KEY in backend .env for automatic vision, or enter the product name manually.",
-                isDemoFixture = false,
-                isLiveInference = false
-            )
-        }
-
-        return localParser.parse(
-            rawText = candidateHint,
-            imageUrl = imageUri
+        return RecognizedProduct(
+            id = "unidentified_${System.currentTimeMillis()}",
+            title = "Unidentified Product",
+            brand = null,
+            category = "Unidentified",
+            specifications = emptyMap(),
+            confidence = 0.0f,
+            imageUrl = imageUri,
+            rawTextSnippet = "",
+            matchType = MatchType.SIMILAR,
+            matchReason = "Image could not be identified offline without a cloud vision key or product description. Edit the product name to search merchants.",
+            isDemoFixture = false,
+            isLiveInference = false,
+            status = RecognitionStatus.UNIDENTIFIED,
+            recognitionSource = RecognitionSource.FALLBACK,
+            searchQuery = "",
+            diagnosticNote = "Offline fallback: raw filename/URI ignored; visual recognition requires backend GEMINI_API_KEY."
         )
     }
 
@@ -247,44 +248,52 @@ class DemoProductRecognitionProvider(
         )
     }
 
+    private fun containsWord(haystackLower: String, termLower: String): Boolean {
+        return Regex("""(?<![a-z0-9])${Regex.escape(termLower)}(?![a-z0-9])""")
+            .containsMatchIn(haystackLower)
+    }
+
     /**
-     * Matches text query against the 5 primary demo fixtures.
+     * Matches verified clean text queries against curated demo fixtures using strict word boundaries.
      */
     fun findDemoFixture(query: String): RecognizedProduct? {
-        val q = query.lowercase()
+        if (isGenericCaptureText(query)) return null
+        val q = query.lowercase().trim()
 
         // Samsung 990 EVO SSD
-        if (q.contains("990 evo") || (q.contains("samsung") && (q.contains("ssd") || q.contains("990")))) {
+        if (q.contains("990 evo") || (containsWord(q, "samsung") && (containsWord(q, "ssd") || containsWord(q, "990")))) {
             return FIXTURE_SAMSUNG_SSD
         }
 
         // Sony WH-1000XM5
-        if (q.contains("1000xm5") || q.contains("wh-1000xm") || (q.contains("sony") && (q.contains("headphone") || q.contains("xm5")))) {
+        if (q.contains("1000xm5") || q.contains("wh-1000xm") || (containsWord(q, "sony") && (q.contains("headphone") || containsWord(q, "xm5")))) {
             return FIXTURE_SONY_HEADPHONES
         }
 
         // Nike Air Max 270
-        if (q.contains("air max 270") || (q.contains("nike") && (q.contains("air max") || q.contains("shoe")))) {
+        if (q.contains("air max 270") || (containsWord(q, "nike") && (q.contains("air max") || containsWord(q, "shoe") || containsWord(q, "shoes")))) {
             return FIXTURE_NIKE_SHOES
         }
 
         // Apple MacBook Air M3
-        if (q.contains("macbook") || (q.contains("apple") && q.contains("m3")) || q.contains("air 13-inch m3")) {
+        if (containsWord(q, "macbook") || (containsWord(q, "apple") && containsWord(q, "m3")) || q.contains("air 13-inch m3")) {
             return FIXTURE_APPLE_MACBOOK
         }
 
         // Logitech MX Master 3S
-        if (q.contains("mx master") || q.contains("master 3s") || (q.contains("logitech") && q.contains("mx"))) {
+        if (q.contains("mx master") || q.contains("master 3s") || (containsWord(q, "logitech") && containsWord(q, "mx"))) {
             return FIXTURE_LOGITECH_MOUSE
         }
 
-        // Logitech PRO X2 Superlight (User Screenshot 1)
-        if (q.contains("pro x2") || q.contains("superlight") || (q.contains("logitech") && (q.contains("mouse") || q.contains("gaming")))) {
+        // Logitech PRO X2 Superlight
+        if (q.contains("pro x2") || containsWord(q, "superlight") || (containsWord(q, "logitech") && (containsWord(q, "mouse") || containsWord(q, "gaming")))) {
             return FIXTURE_LOGITECH_PRO_X2
         }
 
-        // Polago Clothing Minimal Maxi (User Screenshot 2)
-        if (q.contains("polago") || q.contains("minimal maxi") || q.contains("maxi dress") || q.contains("dress") || q.contains("chiffon")) {
+        // Polago Clothing Minimal Maxi
+        if (containsWord(q, "polago") || q.contains("minimal maxi") || q.contains("maxi dress") ||
+            (containsWord(q, "chiffon") && containsWord(q, "dress"))
+        ) {
             return FIXTURE_POLAGO_DRESS
         }
 

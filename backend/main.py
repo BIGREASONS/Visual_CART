@@ -48,6 +48,7 @@ gemini_client = GeminiClient()
 # Request & Response Models
 class RecognizeRequest(BaseModel):
     text: Optional[str] = Field(default=None, description="Raw OCR or text snippet")
+    hint_text: Optional[str] = Field(default=None, description="Optional non-filename text hint")
     context_text: Optional[str] = Field(default=None, description="Contextual text")
     image_base64: Optional[str] = Field(default=None, description="Base64-encoded image")
     image_url: Optional[str] = Field(default=None, description="Image URL or URI")
@@ -108,39 +109,41 @@ def health_check():
 @app.post("/api/v1/ai/recognize-product")
 async def recognize_product_v1(req: RecognizeRequest):
     """Primary multimodal recognition gateway keeping Gemini API keys secure server-side.
-    Returns structured JSON with brand, product_name, category, colour, model, specs, and confidence.
+    Returns canonical product identity, recognition status, confidence, and sanitized search query.
     """
     try:
-        effective_text = req.text or req.context_text
+        effective_hint = getattr(req, "hint_text", None) or req.text or req.context_text
         result = await gemini_client.understand_product(
-            text=effective_text,
+            text=effective_hint,
+            hint_text=getattr(req, "hint_text", None),
             image_base64=req.image_base64,
-            mime_type=req.mime_type
+            mime_type=req.mime_type,
         )
         return {
-            "status": "success",
+            "http_status": "success",
             "data": result,
-            **result
+            **result,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Multimodal recognition failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Multimodal recognition failed: {type(e).__name__}")
 
 @app.post("/api/ai/recognize")
 async def recognize_product(req: RecognizeRequest):
     try:
-        effective_text = req.text or req.context_text
+        effective_hint = getattr(req, "hint_text", None) or req.text or req.context_text
         result = await gemini_client.understand_product(
-            text=effective_text,
+            text=effective_hint,
+            hint_text=getattr(req, "hint_text", None),
             image_base64=req.image_base64,
-            mime_type=req.mime_type
+            mime_type=req.mime_type,
         )
         return {
-            "status": "success",
+            "http_status": "success",
             "data": result,
-            **result
+            **result,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Multimodal recognition failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Multimodal recognition failed: {type(e).__name__}")
 
 @app.get("/api/v1/payments/paypal/configuration")
 @app.get("/api/paypal/configuration")
@@ -264,38 +267,9 @@ async def get_paypal_order_endpoint(order_id: str):
 
 @app.get("/api/merchants/search")
 async def search_merchants(q: str):
-    """Aggregates simulated listings across supported merchants."""
-    query = q.lower()
-    base_price = 5499.0 if "ssd" in query or "crucial" in query else 26990.0
-    return {
-        "query": q,
-        "listings": [
-            {
-                "merchant": "Flipkart",
-                "price": base_price,
-                "originalPrice": base_price + 600,
-                "status": "In Stock",
-                "delivery": "Tomorrow",
-                "isLowest": True,
-                "url": f"https://www.flipkart.com/search?q={q}"
-            },
-            {
-                "merchant": "Amazon India",
-                "price": base_price + 300,
-                "originalPrice": base_price + 600,
-                "status": "In Stock",
-                "delivery": "2 Days",
-                "isLowest": False,
-                "url": f"https://www.amazon.in/s?k={q}"
-            },
-            {
-                "merchant": "Croma",
-                "price": base_price + 300,
-                "originalPrice": base_price + 500,
-                "status": "In Stock",
-                "delivery": "3 Days",
-                "isLowest": False,
-                "url": f"https://www.croma.com/searchB?q={q}"
-            }
-        ]
-    }
+    """Returns honest direct merchant search URLs (no fabricated prices, stock, or delivery claims).
+    Rejects raw capture filenames, timestamps, URIs, and empty noise.
+    """
+    from .gemini_client import build_merchant_search_response
+
+    return build_merchant_search_response(q)

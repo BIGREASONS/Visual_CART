@@ -158,9 +158,18 @@ class ProductRecognitionTest {
 
     @Test
     fun testNonElectronicsProductDoesNotDefaultToElectronicsCategory() {
-        val parsed = LocalProductParser.parse("PVC Plastic Water Pipes 2 inch")
-        assertEquals("General", parsed.category)
-        assertEquals("PVC Plastic Water Pipes 2 inch", parsed.title)
+        val parsedPipes = LocalProductParser.parse("PVC Plastic Water Pipes 2 inch")
+        assertEquals("Industrial Materials", parsedPipes.category)
+        assertTrue(parsedPipes.category != "Electronics")
+        assertEquals("PVC Plastic Water Pipes 2 inch", parsedPipes.title)
+        assertFalse(
+            "Industrial pipe diameter should not be misclassified as monitor display size",
+            parsedPipes.specifications.containsKey("display")
+        )
+
+        val parsedBasket = LocalProductParser.parse("Handwoven Bamboo Storage Basket Medium")
+        assertEquals("Other", parsedBasket.category)
+        assertTrue(parsedBasket.category != "Electronics")
     }
 
     @Test

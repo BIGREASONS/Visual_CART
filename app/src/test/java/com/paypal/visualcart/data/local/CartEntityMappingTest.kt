@@ -167,7 +167,76 @@ class CartEntityMappingTest {
         assertEquals(500.0, summary?.maxSavings ?: 0.0, 0.001)
         assertEquals(1, summary?.exactMatchCount)
         assertTrue(summary?.hasDemoData == true)
+        assertTrue(summary?.hasComparableBestPrice == true)
 
         assertNull(MerchantComparisonSummary.fromListings("Empty", emptyList()))
+    }
+
+    @Test
+    fun testUnpricedDirectSearchLinksExcludedFromLowestPriceAndComparableSavings() {
+        val product = SavedProductEntity(
+            id = "prod_pipes",
+            canonicalProductId = "metal_pipes",
+            title = "Galvanized Metal Pipes",
+            category = "Industrial Materials"
+        )
+        val unpricedSearchRow = MerchantListingEntity(
+            id = "search_amazon",
+            savedProductId = "prod_pipes",
+            merchant = "Amazon India",
+            title = "Galvanized Metal Pipes",
+            price = null,
+            productUrl = "https://www.amazon.in/s?k=Galvanized+Metal+Pipes",
+            listingOrigin = "DIRECT_SEARCH_URL",
+            isSelectedForPurchase = true
+        )
+        val relation = SavedProductWithListings(
+            product = product,
+            listings = listOf(unpricedSearchRow),
+            priceObservations = emptyList()
+        )
+        assertFalse(unpricedSearchRow.hasVerifiedPrice)
+        assertNull("Search link with price=null must not qualify as lowestPriceListing", relation.lowestPriceListing)
+
+        val domainSearchLinks = listOf(
+            MerchantListing(
+                id = "amazon_in_search_1",
+                merchantName = "Amazon India",
+                merchantDomain = "amazon.in",
+                title = "Galvanized Metal Pipes",
+                price = null,
+                currency = "INR",
+                productUrl = "https://www.amazon.in/s?k=Galvanized+Metal+Pipes",
+                imageUrl = "",
+                matchType = MatchType.SIMILAR,
+                confidence = 0.5f,
+                availability = AvailabilityStatus.UNKNOWN,
+                sourceType = SourceType.LIVE,
+                listingOrigin = com.paypal.visualcart.domain.model.ListingOrigin.DIRECT_SEARCH_URL,
+                lastVerifiedAt = 0L
+            ),
+            MerchantListing(
+                id = "flipkart_search_1",
+                merchantName = "Flipkart",
+                merchantDomain = "flipkart.com",
+                title = "Galvanized Metal Pipes",
+                price = null,
+                currency = "INR",
+                productUrl = "https://www.flipkart.com/search?q=Galvanized+Metal+Pipes",
+                imageUrl = "",
+                matchType = MatchType.SIMILAR,
+                confidence = 0.5f,
+                availability = AvailabilityStatus.UNKNOWN,
+                sourceType = SourceType.LIVE,
+                listingOrigin = com.paypal.visualcart.domain.model.ListingOrigin.DIRECT_SEARCH_URL,
+                lastVerifiedAt = 0L
+            )
+        )
+        val summary = MerchantComparisonSummary.fromListings("Galvanized Metal Pipes", domainSearchLinks)
+        assertNotNull(summary)
+        assertNull(summary?.lowestPriceListing)
+        assertNull(summary?.lowestPrice)
+        assertFalse(summary?.hasComparableBestPrice == true)
+        assertEquals(0.0, summary?.maxSavings ?: -1.0, 0.001)
     }
 }

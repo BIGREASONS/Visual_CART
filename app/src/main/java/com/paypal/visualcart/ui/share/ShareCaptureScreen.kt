@@ -11,6 +11,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -86,9 +88,21 @@ import com.paypal.visualcart.core.designsystem.VisualCartCard
 import com.paypal.visualcart.core.designsystem.VisualCartIcons
 import com.paypal.visualcart.core.designsystem.VisualCartTypography
 import com.paypal.visualcart.core.designsystem.WarmIvory
+import com.paypal.visualcart.domain.model.ListingOrigin
 import com.paypal.visualcart.domain.model.MatchType
+import com.paypal.visualcart.domain.model.MerchantComparisonSummary
 import com.paypal.visualcart.domain.model.MerchantListing
+import com.paypal.visualcart.domain.model.RecognitionStatus
 import com.paypal.visualcart.domain.model.RecognizedProduct
+import com.paypal.visualcart.domain.model.RecognizedProductCandidate
+import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
+
+private fun shareCurrencySymbol(currency: String): String = when (currency.uppercase()) {
+    "USD" -> "$"
+    "EUR" -> "€"
+    "GBP" -> "£"
+    else -> "₹"
+}
 
 sealed interface ShareCaptureUiState {
     data class Loading(
@@ -103,14 +117,20 @@ sealed interface ShareCaptureUiState {
         val bestListing: MerchantListing,
         val exactListings: List<MerchantListing>,
         val similarListings: List<MerchantListing>,
-        val selectedListing: MerchantListing
+        val selectedListing: MerchantListing,
+        val comparisonSummary: MerchantComparisonSummary? = MerchantComparisonSummary.fromListings(
+            product.searchQuery.ifBlank { product.title },
+            exactListings + similarListings
+        ),
+        val isUncertain: Boolean = false
     ) : ShareCaptureUiState
 
     data class Saved(
         val productTitle: String,
         val merchantName: String,
-        val price: Double,
-        val totalCartCount: Int
+        val price: Double? = null,
+        val totalCartCount: Int,
+        val currency: String = "INR"
     ) : ShareCaptureUiState
 
     data class Error(val message: String) : ShareCaptureUiState
@@ -119,7 +139,10 @@ sealed interface ShareCaptureUiState {
         val thumbnail: Bitmap? = null,
         val message: String,
         val suggestedQuery: String = "",
-        val imageUri: String? = null
+        val imageUri: String? = null,
+        val candidates: List<RecognizedProductCandidate> = emptyList(),
+        val canRetry: Boolean = false,
+        val detectedCategory: String? = null
     ) : ShareCaptureUiState
 }
 
@@ -133,6 +156,7 @@ fun ShareCaptureDialog(
     onOpenFullCart: () -> Unit,
     onSubmitManualQuery: (String) -> Unit = {},
     onEditQuery: () -> Unit = {},
+    onRetryRecognition: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Dimmed background scrim
@@ -171,6 +195,7 @@ fun ShareCaptureDialog(
                         ShareNeedsQueryContent(
                             state = uiState,
                             onSubmitQuery = onSubmitManualQuery,
+                            onRetryRecognition = onRetryRecognition,
                             onDismiss = onDismiss
                         )
                     }
@@ -180,7 +205,9 @@ fun ShareCaptureDialog(
                             onSelectListing = onSelectListing,
                             onAddToCart = onAddToCart,
                             onViewInStore = onViewInStore,
-                            onEditQuery = onEditQuery
+                            onSubmitCandidateQuery = onSubmitManualQuery,
+                            onEditQuery = onEditQuery,
+                            onRetryRecognition = onRetryRecognition
                         )
                     }
                     is ShareCaptureUiState.Saved -> {
@@ -316,10 +343,21 @@ private fun ShareMatchedContent(
     onSelectListing: (MerchantListing) -> Unit,
     onAddToCart: (MerchantListing) -> Unit,
     onViewInStore: (String) -> Unit,
-    onEditQuery: () -> Unit = {}
+    onSubmitCandidateQuery: (String) -> Unit = {},
+    onEditQuery: () -> Unit = {},
+    onRetryRecognition: () -> Unit = {}
 ) {
-    val allListings = (state.exactListings + state.similarListings).distinctBy { it.id }
-    val hasVerifiedPricing = allListings.any { !it.isDirectSearchUrl }
+    val allListings = remember(state.exactListings, state.similarListings) {
+        (state.exactListings + state.similarListings).distinctBy { it.normalizedMerchantId }
+    }
+    val displayQuery = state.product.searchQuery.ifBlank { state.product.title }
+    val summary = remember(allListings, displayQuery) {
+        MerchantComparisonSummary.fromListings(displayQuery, allListings)
+    }
+    val lowestListing = summary?.lowestPriceListing
+    val isUncertainMatch = state.isUncertain ||
+        state.product.status != RecognitionStatus.IDENTIFIED ||
+        state.product.candidates.size > 1
 
     Column(modifier = Modifier.fillMaxWidth()) {
         // Product Hero Row
@@ -386,10 +424,88 @@ private fun ShareMatchedContent(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        if (hasVerifiedPricing) {
-            val verifiedListings = allListings.filter { !it.isDirectSearchUrl }
-            val savings = ((verifiedListings.maxOfOrNull { it.price } ?: state.bestListing.price) - state.bestListing.price)
-                .coerceAtLeast(0.0)
+        if (isUncertainMatch) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(TerracottaLight)
+                    .border(1.dp, Terracotta.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                Text(
+                    text = if (state.product.candidates.size > 1) {
+                        "MULTIPLE VISUAL MATCHES · CONFIRM PRODUCT"
+                    } else {
+                        "PARTIAL IDENTIFICATION · VERIFY SEARCH QUERY"
+                    },
+                    style = VisualCartTypography.labelSmall.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = Terracotta,
+                        letterSpacing = 0.6.sp
+                    )
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = state.product.matchReason.ifBlank {
+                        "Visual recognition is uncertain. Confirm a candidate or edit the search query before opening stores."
+                    },
+                    style = VisualCartTypography.bodySmall.copy(color = DeepInk)
+                )
+                if (state.product.candidates.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    androidx.compose.foundation.lazy.LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(state.product.candidates.take(4)) { candidate ->
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(PureWhite)
+                                    .border(1.dp, ForestGreen.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+                                    .clickable { onSubmitCandidateQuery(candidate.searchQuery) }
+                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                            ) {
+                                Text(
+                                    text = candidate.title,
+                                    style = VisualCartTypography.labelSmall.copy(
+                                        color = ForestGreen,
+                                        fontWeight = FontWeight.SemiBold
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Edit product name",
+                        modifier = Modifier.clickable(onClick = onEditQuery),
+                        style = VisualCartTypography.labelSmall.copy(
+                            color = ForestGreen,
+                            fontWeight = FontWeight.Bold
+                        )
+                    )
+                    Text(
+                        text = "Try again",
+                        modifier = Modifier.clickable(onClick = onRetryRecognition),
+                        style = VisualCartTypography.labelSmall.copy(
+                            color = DeepInk,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        if (summary != null && summary.hasComparableBestPrice && lowestListing != null && lowestListing.price != null) {
+            val savings = (summary.verifiedSavings ?: summary.maxSavings).coerceAtLeast(0.0)
+            val sym = shareCurrencySymbol(lowestListing.currency)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -410,7 +526,7 @@ private fun ShareMatchedContent(
                         )
                     )
                     Text(
-                        text = "${state.bestListing.merchantName} · ₹${state.bestListing.price.toInt()}",
+                        text = "${lowestListing.merchantName} · $sym${lowestListing.price.toInt()}",
                         style = VisualCartTypography.bodyMedium.copy(
                             fontWeight = FontWeight.Bold,
                             color = DeepInk
@@ -418,7 +534,7 @@ private fun ShareMatchedContent(
                     )
                 }
 
-                if (savings > 0) {
+                if (savings > 0.0) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
@@ -426,13 +542,43 @@ private fun ShareMatchedContent(
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = "Save ₹${savings.toInt()}",
+                            text = "Save $sym${savings.toInt()}",
                             style = VisualCartTypography.labelSmall.copy(
                                 fontWeight = FontWeight.Bold,
                                 color = PureWhite
                             )
                         )
                     }
+                }
+            }
+        } else if (lowestListing != null && lowestListing.price != null) {
+            val sym = shareCurrencySymbol(lowestListing.currency)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(SageLight)
+                    .border(1.dp, Stone, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "SINGLE OFFER LISTED",
+                        style = VisualCartTypography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = ForestGreen,
+                            letterSpacing = 0.8.sp
+                        )
+                    )
+                    Text(
+                        text = "${lowestListing.merchantName} · $sym${lowestListing.price.toInt()}",
+                        style = VisualCartTypography.bodyMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = DeepInk
+                        )
+                    )
                 }
             }
         } else {
@@ -456,7 +602,7 @@ private fun ShareMatchedContent(
                         )
                     )
                     Text(
-                        text = "Tap any ↗ icon to view real results for \"${state.product.title}\"",
+                        text = "Tap any ↗ icon to view real results for \"$displayQuery\"",
                         style = VisualCartTypography.bodySmall.copy(color = MutedSlate),
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
@@ -488,7 +634,9 @@ private fun ShareMatchedContent(
                 ShareMerchantCard(
                     listing = listing,
                     isSelected = listing.id == state.selectedListing.id,
-                    isLowest = hasVerifiedPricing && listing.id == state.bestListing.id,
+                    isLowest = (summary?.hasComparableBestPrice == true) &&
+                        listing.hasVerifiedPrice &&
+                        listing.id == lowestListing?.id,
                     onSelect = { onSelectListing(listing) },
                     onViewInStore = { onViewInStore(listing.productUrl) }
                 )
@@ -498,11 +646,13 @@ private fun ShareMatchedContent(
         Spacer(modifier = Modifier.height(14.dp))
 
         // Primary Action: Add to Visual Cart
+        val selectedPrice = state.selectedListing.price
+        val selectedSym = shareCurrencySymbol(state.selectedListing.currency)
         VisualCartButton(
-            text = if (state.selectedListing.isDirectSearchUrl) {
-                "ADD TO VISUAL CART (~₹${state.selectedListing.price.toInt()})"
+            text = if (state.selectedListing.hasVerifiedPrice && selectedPrice != null) {
+                "ADD TO VISUAL CART ($selectedSym${selectedPrice.toInt()})"
             } else {
-                "ADD TO VISUAL CART (₹${state.selectedListing.price.toInt()})"
+                "SAVE STORE SEARCH LINK"
             },
             onClick = { onAddToCart(state.selectedListing) },
             variant = ButtonVariant.PRIMARY,
@@ -562,36 +712,47 @@ private fun ShareMerchantCard(
                     }
                 }
                 Spacer(modifier = Modifier.width(4.dp))
-                if (listing.isLive) {
-                    LiveInferenceBadge(text = "LIVE")
-                } else if (listing.isDirectSearchUrl) {
-                    SpecTag(spec = "SEARCH LINK")
-                } else if (listing.isDemo) {
-                    DemoDataBadge()
+                when (listing.listingOrigin) {
+                    ListingOrigin.LIVE_API -> LiveInferenceBadge(text = "LIVE")
+                    ListingOrigin.DIRECT_SEARCH_URL -> SpecTag(spec = "SEARCH LINK")
+                    ListingOrigin.VERIFIED_CATALOG_FIXTURE, ListingOrigin.DEMO_DATA -> DemoDataBadge()
+                    ListingOrigin.NO_RESULT -> SpecTag(spec = "UNAVAILABLE")
                 }
             }
 
             Spacer(modifier = Modifier.height(2.dp))
 
             Row(verticalAlignment = Alignment.Bottom) {
-                Text(
-                    text = if (listing.isDirectSearchUrl) {
-                        "Est. ₹${listing.price.toInt()}"
-                    } else {
-                        "₹${listing.price.toInt()}"
-                    },
-                    style = VisualCartTypography.titleSmall.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = if (isLowest) ForestGreen else DeepInk
-                    )
-                )
-                if (!listing.isDirectSearchUrl && listing.originalPrice != null && listing.originalPrice > listing.price) {
-                    Spacer(modifier = Modifier.width(6.dp))
+                val verifiedPrice = listing.price
+                if (listing.hasVerifiedPrice && verifiedPrice != null) {
+                    val sym = shareCurrencySymbol(listing.currency)
                     Text(
-                        text = "₹${listing.originalPrice.toInt()}",
-                        style = VisualCartTypography.labelSmall.copy(
-                            color = MutedSlate,
-                            textDecoration = TextDecoration.LineThrough
+                        text = "$sym${verifiedPrice.toInt()}",
+                        style = VisualCartTypography.titleSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = if (isLowest) ForestGreen else DeepInk
+                        )
+                    )
+                    if (listing.originalPrice != null && listing.originalPrice > verifiedPrice) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "$sym${listing.originalPrice.toInt()}",
+                            style = VisualCartTypography.labelSmall.copy(
+                                color = MutedSlate,
+                                textDecoration = TextDecoration.LineThrough
+                            )
+                        )
+                    }
+                } else {
+                    Text(
+                        text = if (listing.listingOrigin == ListingOrigin.NO_RESULT) {
+                            "No verified offer found"
+                        } else {
+                            "Visit store for live price"
+                        },
+                        style = VisualCartTypography.bodySmall.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            color = MutedSlate
                         )
                     )
                 }
@@ -674,8 +835,13 @@ private fun ShareSavedContent(
 
         Spacer(modifier = Modifier.height(6.dp))
 
+        val savedSummary = if (state.price != null && state.price > 0.0) {
+            "${state.productTitle} from ${state.merchantName} (${shareCurrencySymbol(state.currency)}${state.price.toInt()})"
+        } else {
+            "${state.productTitle} search link saved for ${state.merchantName}"
+        }
         Text(
-            text = "${state.productTitle} from ${state.merchantName} (₹${state.price.toInt()})",
+            text = savedSummary,
             style = VisualCartTypography.bodyMedium.copy(
                 color = MutedSlate
             ),
@@ -720,6 +886,7 @@ private fun ShareSavedContent(
 private fun ShareNeedsQueryContent(
     state: ShareCaptureUiState.NeedsQuery,
     onSubmitQuery: (String) -> Unit,
+    onRetryRecognition: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     var query by remember(state.suggestedQuery) { mutableStateOf(state.suggestedQuery) }
@@ -759,6 +926,67 @@ private fun ShareNeedsQueryContent(
             )
         )
 
+        if (state.candidates.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = "SUGGESTED CANDIDATES",
+                    style = VisualCartTypography.labelSmall.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = MutedSlate
+                    )
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    state.candidates.take(3).forEach { candidate ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(ForestGreenLight)
+                                .border(1.dp, ForestGreen.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+                                .clickable { onSubmitQuery(candidate.searchQuery) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = candidate.title,
+                                style = VisualCartTypography.labelSmall.copy(
+                                    color = ForestGreen,
+                                    fontWeight = FontWeight.SemiBold
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!state.detectedCategory.isNullOrBlank() &&
+            !state.detectedCategory.equals("Unidentified", ignoreCase = true)
+        ) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(StoneLight)
+                    .clickable { onSubmitQuery(state.detectedCategory) }
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    text = "Search category: ${state.detectedCategory}",
+                    style = VisualCartTypography.labelSmall.copy(color = DeepInk)
+                )
+            }
+        }
+
         Spacer(modifier = Modifier.height(14.dp))
 
         OutlinedTextField(
@@ -786,20 +1014,28 @@ private fun ShareNeedsQueryContent(
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             VisualCartButton(
                 text = "Cancel",
                 onClick = onDismiss,
                 variant = ButtonVariant.SECONDARY,
-                modifier = Modifier.weight(0.9f)
+                modifier = Modifier.weight(0.8f)
             )
+            if (state.canRetry) {
+                VisualCartButton(
+                    text = "Try Again",
+                    onClick = onRetryRecognition,
+                    variant = ButtonVariant.SECONDARY,
+                    modifier = Modifier.weight(0.9f)
+                )
+            }
             VisualCartButton(
                 text = "Search Stores",
                 onClick = { if (query.isNotBlank()) onSubmitQuery(query) },
                 variant = ButtonVariant.PRIMARY,
                 icon = Icons.Default.Search,
-                modifier = Modifier.weight(1.4f)
+                modifier = Modifier.weight(1.3f)
             )
         }
     }

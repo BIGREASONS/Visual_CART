@@ -2,13 +2,17 @@ package com.paypal.visualcart.ui.share
 
 import com.paypal.visualcart.core.util.SecurityUtils
 import com.paypal.visualcart.core.util.SharingShortcutsManager
+import com.paypal.visualcart.domain.model.ListingOrigin
 import com.paypal.visualcart.domain.model.MatchType
 import com.paypal.visualcart.domain.model.SourceType
 import com.paypal.visualcart.feature.ai.DemoProductRecognitionProvider
 import com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine
+import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -40,7 +44,7 @@ class VisualCartShareDirectCaptureTest {
             val listings = merchantEngine.searchAll("Polago Minimal Maxi")
 
             assertTrue("Expected at least 3 store listings", listings.size >= 3)
-            val lowest = listings.minByOrNull { it.price }
+            val lowest = listings.filter { it.hasVerifiedPrice }.minByOrNull { it.price ?: Double.MAX_VALUE }
             assertNotNull(lowest)
             assertEquals("Amazon India", lowest?.merchantName)
             assertEquals(2500.0, lowest?.price ?: 0.0, 0.01)
@@ -49,7 +53,7 @@ class VisualCartShareDirectCaptureTest {
             for (i in 0 until listings.size - 1) {
                 assertTrue(
                     "Expected sorted prices: ${listings[i].price} <= ${listings[i + 1].price}",
-                    listings[i].price <= listings[i + 1].price
+                    (listings[i].price ?: Double.MAX_VALUE) <= (listings[i + 1].price ?: Double.MAX_VALUE)
                 )
             }
         }
@@ -68,7 +72,7 @@ class VisualCartShareDirectCaptureTest {
             assertEquals("PRO X2", recognized.specifications["model"])
 
             val listings = merchantEngine.searchAll(recognized.title)
-            val lowest = listings.minByOrNull { it.price }
+            val lowest = listings.filter { it.hasVerifiedPrice }.minByOrNull { it.price ?: Double.MAX_VALUE }
             assertNotNull(lowest)
             assertEquals("Flipkart", lowest?.merchantName)
             assertEquals(15499.0, lowest?.price ?: 0.0, 0.01)
@@ -91,7 +95,7 @@ class VisualCartShareDirectCaptureTest {
             assertEquals("8000 DPI", recognized.specifications["sensor"])
 
             val listings = merchantEngine.searchAll(recognized.title)
-            val lowest = listings.minByOrNull { it.price }
+            val lowest = listings.filter { it.hasVerifiedPrice }.minByOrNull { it.price ?: Double.MAX_VALUE }
             assertEquals("Flipkart", lowest?.merchantName)
             assertEquals(8299.0, lowest?.price ?: 0.0, 0.01)
         }
@@ -145,10 +149,27 @@ class VisualCartShareDirectCaptureTest {
         val combined = exact + similar
         assertEquals(unique.size, combined.size)
         assertEquals(combined.size, combined.map { it.id }.toSet().size)
+        assertEquals(
+            combined.size,
+            combined.map { SearchQueryBuilder.normalizeMerchantKey(it.merchantName) }.toSet().size
+        )
 
-        // Ensure synthesized fallback listings no longer have ₹10,000+ fake price spreads
-        val minPrice = combined.minOf { it.price }
-        val maxPrice = combined.maxOf { it.price }
-        assertTrue("Expected tight synthetic estimate range, got spread ${maxPrice - minPrice}", (maxPrice - minPrice) < 1000.0)
+        // Uncatalogued items must produce honest DIRECT_SEARCH_URL entries with price = null (never synthetic fake prices)
+        assertTrue(combined.all { it.listingOrigin == ListingOrigin.DIRECT_SEARCH_URL })
+        assertTrue(combined.all { it.price == null && !it.hasVerifiedPrice })
+    }
+
+    @Test
+    fun testCaptureTimestampFilenameIsRejectedAndNeverReachesMerchants() {
+        assertTrue(DemoProductRecognitionProvider.isGenericCaptureText("capture 1794369896240 4816"))
+        assertTrue(DemoProductRecognitionProvider.isGenericCaptureText("capture_1794369896240_4816.png"))
+        assertTrue(SearchQueryBuilder.isNonProductNoise("capture 1794369896240 4816"))
+        assertTrue(SearchQueryBuilder.isNonProductNoise("shared image.jpg"))
+
+        val engine = MerchantDiscoveryEngine(
+            MerchantDiscoveryEngine.defaultProviders().map { provider -> provider.apply { isLiveMode = true } }
+        )
+        val listings = runBlocking { engine.searchAll("capture 1794369896240 4816") }
+        assertTrue("Capture filename noise must never generate store search URLs", listings.isEmpty())
     }
 }

@@ -58,35 +58,82 @@ class CartRepositoryImpl(private val cartDao: CartDao) : CartRepository {
         canonicalProductId: String,
         listings: List<MerchantListingEntity>
     ): SavedProductWithListings {
+        val effectiveCanonicalId = canonicalProductId.takeIf { it.isNotBlank() }
+            ?: com.paypal.visualcart.feature.merchant.SearchQueryBuilder.normalizeProductIdentityKey(title)
+        val safeImageUri = imageUri?.takeIf { it.isNotBlank() }
+        val safeOriginalSource = originalSource?.takeIf { it.isNotBlank() }
+
         // Deduplication check: check if an equivalent product already exists
-        val existing = cartDao.findProductByCanonicalId(canonicalProductId)
+        val existing = cartDao.findProductByCanonicalId(effectiveCanonicalId)
         val productEntity = if (existing != null) {
             existing.product.copy(
                 updatedAt = System.currentTimeMillis(),
-                imageUri = imageUri ?: existing.product.imageUri,
-                originalSource = originalSource ?: existing.product.originalSource
+                imageUri = safeImageUri ?: existing.product.imageUri,
+                originalSource = safeOriginalSource ?: existing.product.originalSource
             ).also { cartDao.updateProduct(it) }
         } else {
             SavedProductEntity(
                 id = UUID.randomUUID().toString(),
-                canonicalProductId = canonicalProductId,
+                canonicalProductId = effectiveCanonicalId,
                 title = title,
                 brand = brand,
                 category = category,
-                imageUri = imageUri,
-                originalSource = originalSource,
+                imageUri = safeImageUri,
+                originalSource = safeOriginalSource,
                 createdAt = System.currentTimeMillis(),
                 updatedAt = System.currentTimeMillis()
             ).also { cartDao.insertProduct(it) }
         }
 
-        // Prepare listings associated with the saved product id
-        val preparedListings = listings.map { listing ->
-            listing.copy(
-                id = if (listing.id.isBlank()) UUID.randomUUID().toString() else listing.id,
+        // Deduplicate incoming listings by normalized merchant key, preferring priced/selected/confident rows
+        val now = System.currentTimeMillis()
+        val dedupedByMerchant = linkedMapOf<String, MerchantListingEntity>()
+        for (rawListing in listings) {
+            val merchantKey = com.paypal.visualcart.feature.merchant.SearchQueryBuilder.normalizeMerchantKey(rawListing.merchant)
+            val normalizedPrice = rawListing.price?.takeIf {
+                it > 0.0 &&
+                    rawListing.listingOrigin != "DIRECT_SEARCH_URL" &&
+                    rawListing.listingOrigin != "NO_RESULT"
+            }
+            val cleaned = rawListing.copy(
+                id = if (rawListing.id.isBlank()) UUID.randomUUID().toString() else rawListing.id,
                 savedProductId = productEntity.id,
-                lastVerifiedAt = System.currentTimeMillis()
+                price = normalizedPrice,
+                lastVerifiedAt = now
             )
+            val currentBest = dedupedByMerchant[merchantKey]
+            if (currentBest == null) {
+                dedupedByMerchant[merchantKey] = cleaned
+            } else {
+                val replace = (!currentBest.hasVerifiedPrice && cleaned.hasVerifiedPrice) ||
+                    (currentBest.hasVerifiedPrice == cleaned.hasVerifiedPrice && (
+                        (!currentBest.isSelectedForPurchase && cleaned.isSelectedForPurchase) ||
+                            (cleaned.confidence > currentBest.confidence) ||
+                            ((cleaned.price ?: Double.MAX_VALUE) < (currentBest.price ?: Double.MAX_VALUE))
+                        ))
+                if (replace) {
+                    dedupedByMerchant[merchantKey] = cleaned.copy(
+                        isSelectedForPurchase = cleaned.isSelectedForPurchase || currentBest.isSelectedForPurchase
+                    )
+                } else if (cleaned.isSelectedForPurchase && !currentBest.isSelectedForPurchase) {
+                    dedupedByMerchant[merchantKey] = currentBest.copy(isSelectedForPurchase = true)
+                }
+            }
+        }
+
+        // Ensure at most one listing is marked selected per saved product
+        var seenSelected = false
+        val preparedListings = dedupedByMerchant.values.map { item ->
+            if (item.isSelectedForPurchase) {
+                if (seenSelected) {
+                    item.copy(isSelectedForPurchase = false)
+                } else {
+                    seenSelected = true
+                    item
+                }
+            } else {
+                item
+            }
         }
         cartDao.insertListings(preparedListings)
 

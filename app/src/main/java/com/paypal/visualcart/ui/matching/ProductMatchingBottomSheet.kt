@@ -29,11 +29,15 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,9 +71,13 @@ import com.paypal.visualcart.core.designsystem.VisualCartIcons
 import com.paypal.visualcart.core.designsystem.VisualCartTypography
 import com.paypal.visualcart.core.designsystem.WarmIvory
 import com.paypal.visualcart.domain.model.AvailabilityStatus
+import com.paypal.visualcart.domain.model.ListingOrigin
 import com.paypal.visualcart.domain.model.MatchType
 import com.paypal.visualcart.domain.model.MerchantListing
+import com.paypal.visualcart.domain.model.RecognitionStatus
+import com.paypal.visualcart.domain.model.RecognizedProductCandidate
 import com.paypal.visualcart.domain.model.SourceType
+import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
 
 /**
  * Data structure representing a detected product candidate and its multi-merchant matches.
@@ -82,19 +90,47 @@ data class DetectedProductMatchResult(
     val matchReason: String,
     val listings: List<MerchantListingItem>,
     val isDemoFixture: Boolean = false,
-    val isLiveInference: Boolean = !isDemoFixture
+    val isLiveInference: Boolean = !isDemoFixture,
+    val imageUri: String? = null,
+    val isUncertain: Boolean = false,
+    val recognitionStatus: RecognitionStatus = RecognitionStatus.IDENTIFIED,
+    val candidates: List<RecognizedProductCandidate> = emptyList(),
+    val searchQuery: String = detectedTitle
 )
 
 data class MerchantListingItem(
     val merchantName: String,
-    val price: Double,
+    val price: Double? = null,
     val originalPrice: Double? = null,
+    val currency: String = "INR",
     val matchType: MatchType,
     val confidence: Float,
     val productUrl: String,
+    val listingOrigin: ListingOrigin = if (price != null && price > 0.0) {
+        ListingOrigin.VERIFIED_CATALOG_FIXTURE
+    } else {
+        ListingOrigin.DIRECT_SEARCH_URL
+    },
+    val sourceType: SourceType = if (listingOrigin == ListingOrigin.LIVE_API) {
+        SourceType.LIVE
+    } else {
+        SourceType.DEMO
+    },
     val isLowestPrice: Boolean = false,
-    val stockNote: String = "In Stock"
-)
+    val stockNote: String = if (price != null && price > 0.0) "In Stock" else "Open search results"
+) {
+    val hasVerifiedPrice: Boolean
+        get() = price != null && price > 0.0 &&
+            listingOrigin != ListingOrigin.DIRECT_SEARCH_URL &&
+            listingOrigin != ListingOrigin.NO_RESULT
+}
+
+private fun currencySymbolFor(currency: String): String = when (currency.uppercase()) {
+    "USD" -> "$"
+    "EUR" -> "€"
+    "GBP" -> "£"
+    else -> "₹"
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -103,7 +139,9 @@ fun ProductMatchingBottomSheet(
     onAddToCart: (MerchantListingItem) -> Unit,
     onCompare: (String) -> Unit,
     modifier: Modifier = Modifier,
-    detectedMatch: DetectedProductMatchResult = defaultDetectedResult()
+    detectedMatch: DetectedProductMatchResult = defaultDetectedResult(),
+    onRefineQuery: ((String) -> Unit)? = null,
+    onRetryRecognition: (() -> Unit)? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val context = LocalContext.current
@@ -133,6 +171,11 @@ fun ProductMatchingBottomSheet(
                 .verticalScroll(rememberScrollState())
         ) {
             // Header: Status + Badge + Close
+            val (headerLabel, headerColor) = when (detectedMatch.recognitionStatus) {
+                RecognitionStatus.UNIDENTIFIED -> "NO CLEAR MATCH" to Terracotta
+                RecognitionStatus.PARTIAL -> "POSSIBLE MATCH" to Terracotta
+                RecognitionStatus.IDENTIFIED -> "PRODUCT FOUND" to ForestGreen
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -143,14 +186,14 @@ fun ProductMatchingBottomSheet(
                         modifier = Modifier
                             .size(10.dp)
                             .clip(CircleShape)
-                            .background(ForestGreen)
+                            .background(headerColor)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "PRODUCT FOUND",
+                        text = headerLabel,
                         style = VisualCartTypography.labelSmall.copy(
                             fontWeight = FontWeight.Bold,
-                            color = ForestGreen,
+                            color = headerColor,
                             letterSpacing = 1.2.sp
                         )
                     )
@@ -281,6 +324,110 @@ fun ProductMatchingBottomSheet(
             Spacer(modifier = Modifier.height(20.dp))
 
             // Available Listings Header
+            val dedupedListings = remember(detectedMatch.listings) {
+                detectedMatch.listings.distinctBy { SearchQueryBuilder.normalizeMerchantKey(it.merchantName) }
+            }
+            val pricedListings = dedupedListings.filter { it.hasVerifiedPrice }
+            val distinctPricedCurrencies = pricedListings.map { it.currency.uppercase() }.distinct()
+            val comparableMerchants = if (distinctPricedCurrencies.size == 1) {
+                pricedListings.map { SearchQueryBuilder.normalizeMerchantKey(it.merchantName) }.distinct().size
+            } else {
+                0
+            }
+
+            if (detectedMatch.isUncertain || detectedMatch.recognitionStatus != RecognitionStatus.IDENTIFIED) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = TerracottaLight,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = if (detectedMatch.recognitionStatus == RecognitionStatus.UNIDENTIFIED) {
+                                "UNIDENTIFIED PRODUCT"
+                            } else {
+                                "UNCERTAIN VISUAL MATCH"
+                            },
+                            style = VisualCartTypography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = Terracotta
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = detectedMatch.matchReason,
+                            style = VisualCartTypography.bodySmall.copy(color = DeepInk)
+                        )
+                        if (detectedMatch.candidates.isNotEmpty() && onRefineQuery != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                detectedMatch.candidates.take(4).forEach { candidate ->
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = PureWhite,
+                                        modifier = Modifier.clickable { onRefineQuery(candidate.searchQuery) }
+                                    ) {
+                                        Text(
+                                            text = candidate.title,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            style = VisualCartTypography.labelSmall.copy(color = ForestGreen)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        if (onRefineQuery != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            var refinedQueryText by remember(detectedMatch.detectedTitle, detectedMatch.searchQuery) {
+                                mutableStateOf(
+                                    detectedMatch.searchQuery.takeIf { !SearchQueryBuilder.isNonProductNoise(it) }.orEmpty()
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = refinedQueryText,
+                                    onValueChange = { refinedQueryText = it },
+                                    singleLine = true,
+                                    placeholder = { Text("Enter product name (e.g. metal pipe)") },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                VisualCartButton(
+                                    text = "Search",
+                                    onClick = {
+                                        val clean = refinedQueryText.trim()
+                                        if (clean.isNotEmpty()) {
+                                            onRefineQuery(clean)
+                                        }
+                                    },
+                                    variant = ButtonVariant.PRIMARY,
+                                    enabled = refinedQueryText.isNotBlank(),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                                )
+                            }
+                        }
+                        if (onRetryRecognition != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                VisualCartButton(
+                                    text = "Retry Scan",
+                                    onClick = onRetryRecognition,
+                                    variant = ButtonVariant.SECONDARY,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(14.dp))
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -295,7 +442,12 @@ fun ProductMatchingBottomSheet(
                     )
                 )
                 Text(
-                    text = "${detectedMatch.listings.size} verified matches",
+                    text = when {
+                        dedupedListings.isEmpty() -> "No store links yet"
+                        comparableMerchants >= 2 -> "$comparableMerchants comparable priced offers"
+                        pricedListings.isNotEmpty() -> "${pricedListings.size} priced offer"
+                        else -> "${dedupedListings.size} live search links (unpriced)"
+                    },
                     style = VisualCartTypography.labelSmall.copy(color = ForestGreen, fontWeight = FontWeight.SemiBold)
                 )
             }
@@ -304,7 +456,7 @@ fun ProductMatchingBottomSheet(
 
             // Available Listings List
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                detectedMatch.listings.forEach { listing ->
+                dedupedListings.forEach { listing ->
                     MerchantListingMatchRow(
                         listing = listing,
                         onView = {
@@ -319,13 +471,26 @@ fun ProductMatchingBottomSheet(
             Spacer(modifier = Modifier.height(24.dp))
 
             // Action Buttons
-            val bestListing = detectedMatch.listings.minByOrNull { it.price }
+            val bestListing = pricedListings.minByOrNull { it.price ?: Double.MAX_VALUE }
+                ?: dedupedListings.firstOrNull()
+            val primaryButtonText = when {
+                bestListing != null && bestListing.hasVerifiedPrice && bestListing.price != null && comparableMerchants >= 2 ->
+                    "Add Best Price to Cart (${currencySymbolFor(bestListing.currency)}${bestListing.price.toInt()})"
+                bestListing != null && bestListing.hasVerifiedPrice && bestListing.price != null ->
+                    "Add Offer to Cart (${currencySymbolFor(bestListing.currency)}${bestListing.price.toInt()})"
+                bestListing != null ->
+                    "Save Search Links to Cart"
+                else -> "Close"
+            }
+            val canonicalId = SearchQueryBuilder.normalizeProductIdentityKey(detectedMatch.detectedTitle)
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 VisualCartButton(
-                    text = "Add Best Price to Cart (₹${bestListing?.price?.toInt() ?: 5499})",
+                    text = primaryButtonText,
                     onClick = {
                         if (bestListing != null) {
                             onAddToCart(bestListing)
+                        } else {
+                            onDismiss()
                         }
                     },
                     variant = ButtonVariant.PRIMARY,
@@ -337,13 +502,15 @@ fun ProductMatchingBottomSheet(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    VisualCartButton(
-                        text = "Compare All Stores",
-                        onClick = { onCompare("crucial-p3-plus-1tb") },
-                        variant = ButtonVariant.SECONDARY,
-                        icon = VisualCartIcons.CompareArrows,
-                        modifier = Modifier.weight(1f)
-                    )
+                    if (dedupedListings.isNotEmpty()) {
+                        VisualCartButton(
+                            text = "Compare All Stores",
+                            onClick = { onCompare(canonicalId) },
+                            variant = ButtonVariant.SECONDARY,
+                            icon = VisualCartIcons.CompareArrows,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
 
                     VisualCartButton(
                         text = "Dismiss",
@@ -380,7 +547,7 @@ private fun MerchantListingMatchRow(
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     MerchantLogoBadge(merchantName = listing.merchantName)
-                    if (listing.isLowestPrice) {
+                    if (listing.isLowestPrice && listing.hasVerifiedPrice) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Surface(
                             shape = RoundedCornerShape(4.dp),
@@ -396,25 +563,48 @@ private fun MerchantListingMatchRow(
                                 )
                             )
                         }
+                    } else if (listing.listingOrigin == ListingOrigin.DIRECT_SEARCH_URL) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        SpecTag(spec = "SEARCH LINK")
+                    } else if (listing.listingOrigin == ListingOrigin.VERIFIED_CATALOG_FIXTURE ||
+                        listing.listingOrigin == ListingOrigin.DEMO_DATA
+                    ) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        DemoDataBadge()
                     }
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Row(verticalAlignment = Alignment.Bottom) {
-                    Text(
-                        text = "₹${listing.price.toInt()}",
-                        style = VisualCartTypography.titleLarge.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = DeepInk
-                        )
-                    )
-                    if (listing.originalPrice != null && listing.originalPrice > listing.price) {
-                        Spacer(modifier = Modifier.width(6.dp))
+                    val priceVal = listing.price
+                    if (listing.hasVerifiedPrice && priceVal != null) {
                         Text(
-                            text = "₹${listing.originalPrice.toInt()}",
+                            text = "${currencySymbolFor(listing.currency)}${priceVal.toInt()}",
+                            style = VisualCartTypography.titleLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = DeepInk
+                            )
+                        )
+                        if (listing.originalPrice != null && listing.originalPrice > priceVal) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "${currencySymbolFor(listing.currency)}${listing.originalPrice.toInt()}",
+                                style = VisualCartTypography.bodySmall.copy(
+                                    textDecoration = TextDecoration.LineThrough,
+                                    color = MutedSlate
+                                )
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = if (listing.listingOrigin == ListingOrigin.NO_RESULT) {
+                                "No verified offer"
+                            } else {
+                                "Visit store for live price"
+                            },
                             style = VisualCartTypography.bodySmall.copy(
-                                textDecoration = TextDecoration.LineThrough,
+                                fontWeight = FontWeight.SemiBold,
                                 color = MutedSlate
                             )
                         )
@@ -423,10 +613,17 @@ private fun MerchantListingMatchRow(
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-                ConfidenceIndicator(
-                    matchType = listing.matchType,
-                    confidence = listing.confidence
-                )
+                if (listing.listingOrigin == ListingOrigin.DIRECT_SEARCH_URL) {
+                    Text(
+                        text = listing.stockNote.ifBlank { "Open live search in browser" },
+                        style = VisualCartTypography.bodySmall.copy(color = MutedSlate, fontSize = 11.sp)
+                    )
+                } else {
+                    ConfidenceIndicator(
+                        matchType = listing.matchType,
+                        confidence = listing.confidence
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.width(12.dp))
@@ -459,7 +656,9 @@ fun defaultDetectedResult(): DetectedProductMatchResult {
         brand = "Crucial",
         category = "Electronics",
         specs = listOf("1TB", "NVMe", "PCIe 4.0", "M.2 2280", "5000 MB/s"),
-        matchReason = "Likely same product: matching brand, model, capacity and interface across merchants.",
+        matchReason = "Sample demonstration item: matching brand, model, capacity and interface across catalog fixtures.",
+        isDemoFixture = true,
+        isLiveInference = false,
         listings = listOf(
             MerchantListingItem(
                 merchantName = "Flipkart",
@@ -498,6 +697,115 @@ fun defaultDetectedResult(): DetectedProductMatchResult {
                 isLowestPrice = false
             )
         )
+    )
+}
+
+fun sonyDemoDetectedResult(): DetectedProductMatchResult {
+    return DetectedProductMatchResult(
+        detectedTitle = "Sony WH-1000XM5 Wireless Noise Cancelling Headphones",
+        brand = "Sony",
+        category = "Audio",
+        specs = listOf("Over-Ear", "Bluetooth 5.2", "30 Hours Battery", "ANC"),
+        matchReason = "Sample demonstration item: Sony WH-1000XM5 catalog fixture across verified stores.",
+        isDemoFixture = true,
+        isLiveInference = false,
+        listings = listOf(
+            MerchantListingItem(
+                merchantName = "Flipkart",
+                price = 24990.0,
+                originalPrice = 34990.0,
+                matchType = MatchType.EXACT,
+                confidence = 0.98f,
+                productUrl = "https://www.flipkart.com/search?q=Sony+WH-1000XM5",
+                isLowestPrice = true
+            ),
+            MerchantListingItem(
+                merchantName = "Amazon India",
+                price = 25990.0,
+                originalPrice = 34990.0,
+                matchType = MatchType.EXACT,
+                confidence = 0.97f,
+                productUrl = "https://www.amazon.in/s?k=Sony+WH-1000XM5",
+                isLowestPrice = false
+            ),
+            MerchantListingItem(
+                merchantName = "Croma",
+                price = 26990.0,
+                originalPrice = 34990.0,
+                matchType = MatchType.EXACT,
+                confidence = 0.95f,
+                productUrl = "https://www.croma.com/searchB?q=Sony+WH-1000XM5",
+                isLowestPrice = false
+            )
+        )
+    )
+}
+
+suspend fun resolveManualRefinedMatch(
+    rawQuery: String,
+    existingImageUri: String?
+): DetectedProductMatchResult {
+    val cleanQuery = com.paypal.visualcart.core.util.SecurityUtils.sanitizeSearchQuery(rawQuery).trim()
+    val queryResult = SearchQueryBuilder.buildFromRawQuery(cleanQuery)
+    if (queryResult is SearchQueryBuilder.Result.Rejected) {
+        return DetectedProductMatchResult(
+            detectedTitle = "Unidentified Image (Enter Search Manually)",
+            brand = "Needs Query",
+            category = "Unidentified",
+            specs = emptyList(),
+            matchReason = "Please enter a clearer product name (not a filename or timestamp).",
+            listings = emptyList(),
+            isDemoFixture = false,
+            isLiveInference = false,
+            imageUri = existingImageUri,
+            isUncertain = true,
+            recognitionStatus = RecognitionStatus.UNIDENTIFIED,
+            searchQuery = ""
+        )
+    }
+
+    val validQuery = (queryResult as SearchQueryBuilder.Result.Valid).query
+    val parsed = com.paypal.visualcart.feature.ai.LocalProductParser.parse(validQuery, imageUrl = existingImageUri)
+    val liveEngine = com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine(
+        com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine.defaultProviders().map {
+            it.apply { isLiveMode = true }
+        }
+    )
+    val discovery = liveEngine.discoverStructured(parsed)
+    val allListings = liveEngine.deduplicateListings(
+        discovery.exactMatches + discovery.similarAlternatives + discovery.searchLinks
+    )
+    val summary = com.paypal.visualcart.domain.model.MerchantComparisonSummary.fromListings(validQuery, allListings)
+
+    return DetectedProductMatchResult(
+        detectedTitle = parsed.title.ifBlank { validQuery },
+        brand = parsed.brand ?: "Detected Product",
+        category = parsed.category,
+        specs = parsed.specifications.entries.map { "${it.key}: ${it.value}" },
+        matchReason = "Prepared ${allListings.size} store search links for \"$validQuery\".",
+        listings = allListings.map { listing ->
+            MerchantListingItem(
+                merchantName = listing.merchantName,
+                price = if (listing.hasVerifiedPrice) listing.price else null,
+                originalPrice = if (listing.hasVerifiedPrice) listing.originalPrice else null,
+                currency = listing.currency,
+                matchType = listing.matchType,
+                confidence = listing.confidence,
+                productUrl = listing.productUrl,
+                listingOrigin = listing.listingOrigin,
+                sourceType = listing.sourceType,
+                isLowestPrice = (summary?.hasComparableBestPrice == true) &&
+                    listing.hasVerifiedPrice &&
+                    listing.normalizedMerchantId == summary.lowestPriceListing?.normalizedMerchantId,
+                stockNote = if (listing.hasVerifiedPrice) "In Stock" else "Open search results"
+            )
+        },
+        isDemoFixture = false,
+        isLiveInference = false,
+        imageUri = existingImageUri,
+        isUncertain = false,
+        recognitionStatus = RecognitionStatus.IDENTIFIED,
+        searchQuery = validQuery
     )
 }
 

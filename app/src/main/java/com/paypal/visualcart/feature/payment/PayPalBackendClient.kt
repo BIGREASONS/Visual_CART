@@ -148,10 +148,16 @@ open class PayPalBackendClient(
         taxRate: Double = 0.18,
         deliveryFee: Double = 0.0
     ): CreateOrderServerResult? {
+        val verifiedPrice = listing.price
+        if (!listing.hasVerifiedPrice || verifiedPrice == null || verifiedPrice <= 0.0 || !verifiedPrice.isFinite()) {
+            lastErrorMessage = "ERR_PRICE_UNAVAILABLE: Price is unavailable for search links."
+            return null
+        }
+
         val payload = """
             {
               "title": "${escapeJson(listing.title)}",
-              "amount": ${listing.price},
+              "amount": $verifiedPrice,
               "currency": "${escapeJson(listing.currency)}",
               "listing_id": "${escapeJson(listing.id)}",
               "merchant_name": "${escapeJson(listing.merchantName)}",
@@ -172,10 +178,10 @@ open class PayPalBackendClient(
         val status = extractString(responseText, "status") ?: "CREATED"
         val approveUrl = extractString(responseText, "approve_url") ?: ""
         val currency = extractString(responseText, "currency") ?: listing.currency
-        val amount = extractDouble(responseText, "amount") ?: listing.price
+        val amount = extractDouble(responseText, "amount") ?: verifiedPrice
         val isLive = extractBoolean(responseText, "is_live_sandbox") ?: false
 
-        val subtotal = extractNestedDouble(responseText, "order_summary", "subtotal") ?: (listing.price * quantity)
+        val subtotal = extractNestedDouble(responseText, "order_summary", "subtotal") ?: (verifiedPrice * quantity)
         val tax = extractNestedDouble(responseText, "order_summary", "tax") ?: (subtotal * taxRate)
         val delivery = extractNestedDouble(responseText, "order_summary", "delivery_fee") ?: deliveryFee
         val total = extractNestedDouble(responseText, "order_summary", "total") ?: (subtotal + tax + delivery)

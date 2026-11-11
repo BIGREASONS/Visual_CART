@@ -84,6 +84,7 @@ import com.paypal.visualcart.domain.model.AvailabilityStatus
 import com.paypal.visualcart.domain.model.MatchType
 import com.paypal.visualcart.domain.model.MerchantListing
 import com.paypal.visualcart.domain.model.SourceType
+import com.paypal.visualcart.service.overlay.VisualCartOverlayService
 
 /**
  * Editorial data model for Home carousel and price observations.
@@ -109,11 +110,22 @@ fun HomeScreen(
     onNavigateToDetail: (String) -> Unit,
     onNavigateToSettings: () -> Unit,
     onProductDetected: () -> Unit,
+    onDemoScan: (String) -> Unit = { _ -> onProductDetected() },
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     var showAddCaptureDialog by remember { mutableStateOf(false) }
-    var floatingBubbleEnabled by remember { mutableStateOf(false) }
+    var floatingBubbleEnabled by remember { mutableStateOf(VisualCartOverlayService.isRunning) }
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                floatingBubbleEnabled = VisualCartOverlayService.isRunning
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     var selectedCategoryFilter by remember { mutableStateOf<String?>(null) }
 
     val recentItems = remember {
@@ -401,6 +413,11 @@ fun HomeScreen(
                                     context.startActivity(intent)
                                 } else {
                                     floatingBubbleEnabled = isChecked
+                                    if (isChecked) {
+                                        VisualCartOverlayService.start(context)
+                                    } else {
+                                        VisualCartOverlayService.stop(context)
+                                    }
                                 }
                             },
                             colors = SwitchDefaults.colors(
@@ -627,7 +644,7 @@ fun HomeScreen(
                             text = "Scan Crucial P3 Plus SSD (Demo)",
                             onClick = {
                                 showAddCaptureDialog = false
-                                onProductDetected()
+                                onDemoScan("crucial")
                             },
                             variant = ButtonVariant.PRIMARY,
                             icon = VisualCartIcons.ScanCamera,
@@ -637,7 +654,7 @@ fun HomeScreen(
                             text = "Scan Sony WH-1000XM5 (Demo)",
                             onClick = {
                                 showAddCaptureDialog = false
-                                onProductDetected()
+                                onDemoScan("sony")
                             },
                             variant = ButtonVariant.SECONDARY,
                             icon = VisualCartIcons.ScanCamera,
@@ -737,7 +754,7 @@ private fun RecentSavedProductCard(
             ) {
                 Column {
                     Text(
-                        text = "Verified Best Price",
+                        text = if (item.isDemo) "Demo Sample Price" else "Best Price",
                         style = VisualCartTypography.labelSmall.copy(
                             fontSize = 10.sp,
                             color = MutedSlate

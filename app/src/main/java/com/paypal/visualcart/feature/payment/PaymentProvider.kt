@@ -33,8 +33,9 @@ data class OrderSummary(
             gstRate: Double = 0.18,
             deliveryFee: Double = 0.0
         ): OrderSummary {
-            require(listing.price > 0.0 && listing.price.isFinite()) {
-                "Invalid listing price: ${listing.price}. Price must be positive and finite."
+            val rawPrice = listing.price
+            require(listing.hasVerifiedPrice && rawPrice != null && rawPrice > 0.0 && rawPrice.isFinite()) {
+                "Invalid listing price: ${listing.price}. Price must be verified, positive, and finite."
             }
             require(gstRate in 0.0..1.0 && gstRate.isFinite()) {
                 "Invalid GST rate: $gstRate. Rate must be between 0.0 and 1.0."
@@ -43,7 +44,7 @@ data class OrderSummary(
                 "Invalid delivery fee: $deliveryFee. Delivery fee cannot be negative."
             }
 
-            val subtotal = listing.price
+            val subtotal = rawPrice
             val gst = Math.round(subtotal * gstRate * 100.0) / 100.0
             val total = Math.round((subtotal + gst + deliveryFee) * 100.0) / 100.0
             return OrderSummary(
@@ -63,7 +64,9 @@ data class OrderSummary(
          */
         fun validateIntegrity(expectedListing: MerchantListing, summary: OrderSummary): Boolean {
             if (summary.listingId != expectedListing.id) return false
-            if (Math.abs(summary.subtotal - expectedListing.price) > 0.001) return false
+            val expectedPrice = expectedListing.price ?: return false
+            if (!expectedListing.hasVerifiedPrice) return false
+            if (Math.abs(summary.subtotal - expectedPrice) > 0.001) return false
             if (summary.currency != expectedListing.currency) return false
             val expectedTotal = Math.round((summary.subtotal + summary.gst + summary.deliveryFee) * 100.0) / 100.0
             if (Math.abs(summary.total - expectedTotal) > 0.01) return false

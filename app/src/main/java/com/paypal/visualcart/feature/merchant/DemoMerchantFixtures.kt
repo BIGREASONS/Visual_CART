@@ -508,155 +508,94 @@ object DemoMerchantFixtures {
      * If not, synthesizes a realistic, normalized listing tagged [SourceType.DEMO]
      * with valid search URLs and plausible pricing.
      */
+    private val WEAK_GENERIC_KEYWORDS = setOf(
+        "15", "x2", "p3", "dress", "shoes", "1tb", "ssd", "mouse", "laptop",
+        "headphones", "camera", "maxi", "running shoes", "wireless", "gaming"
+    )
+
+    private fun matchesWholeWord(haystackLower: String, keywordLower: String): Boolean {
+        val pattern = Regex("""(?<![a-z0-9])${Regex.escape(keywordLower)}(?![a-z0-9])""")
+        return pattern.containsMatchIn(haystackLower)
+    }
+
+    fun hasCatalogMatch(query: String): Boolean {
+        val canonicalQuery = SearchQueryBuilder.buildFromRawQuery(query).validQueryOrNull
+            ?: return false
+        return resolveCatalogMatch(canonicalQuery.lowercase(Locale.ROOT).trim()) != null
+    }
+
+    private fun resolveCatalogMatch(lowerQuery: String): FixtureProduct? {
+        return CATALOG
+            .mapNotNull { product ->
+                val hits = product.keywords
+                    .map { it.lowercase(Locale.ROOT).trim() }
+                    .distinct()
+                    .filter { kw -> kw.isNotBlank() && matchesWholeWord(lowerQuery, kw) }
+                if (hits.isEmpty()) return@mapNotNull null
+
+                val hasStrongIdentifier = hits.any { kw -> kw !in WEAK_GENERIC_KEYWORDS && kw.length >= 4 }
+                if (!hasStrongIdentifier && hits.size < 2) return@mapNotNull null
+
+                val score = hits.sumOf { kw ->
+                    if (kw in WEAK_GENERIC_KEYWORDS) kw.length else kw.length * 3
+                } + hits.size * 10
+                product to score
+            }
+            .maxByOrNull { it.second }
+            ?.first
+    }
+
+    /**
+     * Resolves a verified benchmark catalog fixture for [canonicalQuery] using strict whole-word
+     * token matching. Rejects raw filenames, capture timestamps, URIs, and generic single words
+     * (`shoes`, `dress`, `1tb`, `ssd`, `15`, `p3`, `x2`) unless paired with another identifying token.
+     *
+     * Returns `null` when no verified catalog fixture matches, so adapters return an honest
+     * unpriced `DIRECT_SEARCH_URL` instead of synthesizing fake prices.
+     */
     fun findDemoListing(
         merchantId: String,
         merchantName: String,
         merchantDomain: String,
         query: String,
-        searchUrlBuilder: (String) -> String
+        @Suppress("UNUSED_PARAMETER") searchUrlBuilder: (String) -> String = { "" }
     ): MerchantListing? {
-        val lowerQuery = query.lowercase(Locale.ROOT).trim()
-        val queryTokens = lowerQuery.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val canonicalQuery = SearchQueryBuilder.buildFromRawQuery(query).validQueryOrNull
+            ?: return null
+        val lowerQuery = canonicalQuery.lowercase(Locale.ROOT).trim()
 
-        // 1. Check verified catalog fixtures by highest keyword specificity
-        val matchedProduct = CATALOG
-            .map { product ->
-                val matchingLength = product.keywords
-                    .filter { kw -> lowerQuery.contains(kw) }
-                    .maxOfOrNull { it.length } ?: 0
-                product to matchingLength
-            }
-            .filter { it.second > 0 }
-            .maxByOrNull { it.second }
-            ?.first
+        // 1. Strict whole-word match against verified catalog fixtures
+        val matchedProduct = resolveCatalogMatch(lowerQuery)
 
         if (matchedProduct != null) {
-            val fixtureData = matchedProduct.merchantData[merchantId]
-            if (fixtureData != null) {
-                return MerchantListing(
-                    id = "${merchantId}_${matchedProduct.key}",
-                    merchantName = merchantName,
-                    merchantLogoRes = null,
-                    merchantDomain = merchantDomain,
-                    title = fixtureData.title,
-                    price = fixtureData.price,
-                    originalPrice = fixtureData.originalPrice,
-                    currency = "INR",
-                    productUrl = fixtureData.productUrl,
-                    imageUrl = fixtureData.imageUrl,
-                    matchType = fixtureData.matchType,
-                    confidence = fixtureData.confidence,
-                    availability = fixtureData.availability,
-                    sourceType = SourceType.DEMO,
-                    lastVerifiedAt = DEMO_VERIFIED_TIMESTAMP,
-                    deliveryEstimate = fixtureData.deliveryEstimate,
-                    rating = fixtureData.rating,
-                    reviewCount = fixtureData.reviewCount,
-                    sellerName = "$merchantName Official / Authorized Seller",
-                    listingOrigin = ListingOrigin.VERIFIED_CATALOG_FIXTURE
-                )
-            }
-            return null
+            val fixtureData = matchedProduct.merchantData[merchantId] ?: return null
+            return MerchantListing(
+                id = "${merchantId}_${matchedProduct.key}",
+                merchantName = merchantName,
+                merchantLogoRes = null,
+                merchantDomain = merchantDomain,
+                title = fixtureData.title,
+                price = fixtureData.price,
+                originalPrice = fixtureData.originalPrice,
+                currency = "INR",
+                productUrl = fixtureData.productUrl,
+                imageUrl = fixtureData.imageUrl,
+                matchType = fixtureData.matchType,
+                confidence = fixtureData.confidence,
+                availability = fixtureData.availability,
+                sourceType = SourceType.DEMO,
+                lastVerifiedAt = DEMO_VERIFIED_TIMESTAMP,
+                deliveryEstimate = fixtureData.deliveryEstimate,
+                rating = fixtureData.rating,
+                reviewCount = fixtureData.reviewCount,
+                sellerName = "$merchantName Official / Authorized Seller",
+                listingOrigin = ListingOrigin.VERIFIED_CATALOG_FIXTURE,
+                isReferencePriceVerified = fixtureData.originalPrice != null &&
+                    fixtureData.originalPrice > fixtureData.price
+            )
         }
 
-        // 2. Fallback dynamic direct search URL synthesis for arbitrary queries so discovery engine always functions
-        return synthesizeRealisticListing(
-            merchantId = merchantId,
-            merchantName = merchantName,
-            merchantDomain = merchantDomain,
-            query = query,
-            searchUrl = searchUrlBuilder(query)
-        )
-    }
-
-    private fun synthesizeRealisticListing(
-        merchantId: String,
-        merchantName: String,
-        merchantDomain: String,
-        query: String,
-        searchUrl: String
-    ): MerchantListing {
-        val hash = abs(query.hashCode())
-        val basePrice = 1499.0 + (hash % 3500)
-        // Small realistic variance across merchants derived strictly from the shared query hash
-        val multiplier = when (merchantId) {
-            "flipkart" -> 0.96
-            "croma" -> 0.98
-            "amazon_in" -> 1.00
-            "tatacliq" -> 1.02
-            "reliance_digital" -> 1.01
-            else -> 1.03
-        }
-        val calculatedPrice = (basePrice * multiplier).toInt().toDouble()
-        val originalPrice = (calculatedPrice * 1.25).toInt().toDouble()
-
-        val cleanTitle = query.trim().split(" ")
-            .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
-
-        return MerchantListing(
-            id = "${merchantId}_syn_${hash % 100000}",
-            merchantName = merchantName,
-            merchantLogoRes = null,
-            merchantDomain = merchantDomain,
-            title = "$cleanTitle ($merchantName Search Result)",
-            price = calculatedPrice,
-            originalPrice = originalPrice,
-            currency = "INR",
-            productUrl = searchUrl,
-            imageUrl = "https://via.placeholder.com/600x600.png?text=${MerchantUrlHelper.urlEncode(merchantName)}",
-            matchType = MatchType.LIKELY,
-            confidence = 0.88f,
-            availability = AvailabilityStatus.IN_STOCK,
-            sourceType = SourceType.DEMO,
-            lastVerifiedAt = System.currentTimeMillis(),
-            deliveryEstimate = "Standard Delivery (2-3 business days)",
-            rating = 4.3f + (hash % 6) * 0.1f,
-            reviewCount = 50 + (hash % 450),
-            sellerName = "$merchantName Search",
-            listingOrigin = ListingOrigin.DIRECT_SEARCH_URL
-        )
-    }
-
-    /**
-     * Synthesizes or adapts a real-time live merchant listing.
-     * Unmistakably tagged with [SourceType.LIVE] and [ListingOrigin.LIVE_API].
-     */
-    fun createLiveListing(
-        merchantId: String,
-        merchantName: String,
-        merchantDomain: String,
-        title: String,
-        price: Double,
-        originalPrice: Double? = null,
-        productUrl: String,
-        imageUrl: String = "https://via.placeholder.com/600x600.png?text=${MerchantUrlHelper.urlEncode(merchantName)}",
-        matchType: MatchType = MatchType.EXACT,
-        confidence: Float = 0.99f,
-        availability: AvailabilityStatus = AvailabilityStatus.IN_STOCK,
-        deliveryEstimate: String = "Free Delivery in 1-2 days",
-        sellerName: String = "$merchantName Verified Merchant"
-    ): MerchantListing {
-        return MerchantListing(
-            id = "${merchantId}_live_${abs(title.hashCode() % 100000)}",
-            merchantName = merchantName,
-            merchantLogoRes = null,
-            merchantDomain = merchantDomain,
-            title = title,
-            price = price,
-            originalPrice = originalPrice,
-            currency = "INR",
-            productUrl = productUrl,
-            imageUrl = imageUrl,
-            matchType = matchType,
-            confidence = confidence,
-            availability = availability,
-            sourceType = SourceType.LIVE,
-            lastVerifiedAt = System.currentTimeMillis(),
-            deliveryEstimate = deliveryEstimate,
-            rating = 4.8f,
-            reviewCount = 1200,
-            sellerName = sellerName,
-            listingOrigin = ListingOrigin.LIVE_API
-        )
+        // No catalog fixture matches: return null (adapters emit unpriced DIRECT_SEARCH_URL).
+        return null
     }
 }

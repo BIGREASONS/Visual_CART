@@ -59,29 +59,26 @@ class FlipkartAdapter(
         query: String,
         targetSpecs: Map<String, String>
     ): List<MerchantListing> {
+        val canonicalQuery = com.paypal.visualcart.feature.merchant.SearchQueryBuilder
+            .buildFromRawQuery(query)
+            .validQueryOrNull ?: return emptyList()
+
         if (isLiveMode) {
-            val live = DemoMerchantFixtures.createLiveListing(
-                merchantId = merchantId,
-                merchantName = merchantName,
-                merchantDomain = domain,
-                title = "$query (Flipkart Live API)",
-                price = 5499.0,
-                originalPrice = 9899.0,
-                productUrl = buildSearchUrl(query),
-                deliveryEstimate = "Delivery by Tomorrow, 2 PM",
-                sellerName = "Flipkart SuperComNet"
-            )
-            return listOf(live)
+            return listOf(buildDirectSearchListing(canonicalQuery))
         }
 
         val listing = DemoMerchantFixtures.findDemoListing(
             merchantId = merchantId,
             merchantName = merchantName,
             merchantDomain = domain,
-            query = query,
+            query = canonicalQuery,
             searchUrlBuilder = ::buildSearchUrl
         )
 
-        return if (listing != null) listOf(listing) else emptyList()
+        return when {
+            listing != null -> listOf(listing)
+            DemoMerchantFixtures.hasCatalogMatch(canonicalQuery) -> emptyList()
+            else -> listOf(buildDirectSearchListing(canonicalQuery))
+        }
     }
 }

@@ -137,4 +137,22 @@ class SafeImageDecoderSecurityTest {
             tempEmptyFile.delete()
         }
     }
+
+    @Test
+    fun testMagicByteMimeDetectionAndBinaryHeaderDimensions() {
+        val pngBytes = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        )
+        assertEquals("image/png", SafeImageDecoder.detectMimeTypeFromBytes(pngBytes))
+        assertEquals("image/png", SafeImageDecoder.resolveBestMimeType(pngBytes, "image/*"))
+        assertEquals("png", SafeImageDecoder.extensionForMimeType("image/png"))
+
+        val pngDims = SafeImageDecoder.parseImageDimensionsFromBytes(pngBytes)
+        assertEquals(Pair(1, 1), pngDims)
+
+        // HTML payload claiming image/* must be rejected (null MIME)
+        val htmlBytes = "<html><body>Not an image</body></html>".toByteArray()
+        assertNull(SafeImageDecoder.detectMimeTypeFromBytes(htmlBytes))
+        assertNull(SafeImageDecoder.resolveBestMimeType(htmlBytes, "image/*"))
+    }
 }

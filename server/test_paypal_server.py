@@ -865,5 +865,23 @@ def test_health_endpoint_reports_gemini_key_flag(monkeypatch):
     assert res_present.json()["has_gemini_api_key"] is True
 
 
+def test_merchants_search_rejects_noise_and_has_no_fabricated_prices():
+    res_noise = client.get("/api/merchants/search", params={"q": "capture 1794369896240 4816"})
+    assert res_noise.status_code == 200
+    assert res_noise.json()["rejected"] is True
+    assert res_noise.json()["listings"] == []
+
+    res_pipes = client.get("/api/merchants/search", params={"q": "Galvanized Metal Pipes"})
+    assert res_pipes.status_code == 200
+    payload = res_pipes.json()
+    assert payload["rejected"] is False
+    assert payload["query"] == "Galvanized Metal Pipes"
+    assert len(payload["listings"]) >= 3
+    for item in payload["listings"]:
+        assert item["price"] is None
+        assert item["listing_origin"] == "DIRECT_SEARCH_URL"
+
+
+
 
 

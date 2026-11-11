@@ -218,17 +218,36 @@ class MerchantAdaptersTest {
 
     @Test
     fun testLiveApiListingUnmistakablyTagged() = runBlocking {
+        // Without a verified live merchant API backend, live-mode adapter MUST return honest DIRECT_SEARCH_URL (never fake price)
         val liveAmazonAdapter = AmazonIndiaAdapter(isLiveMode = true)
         val results = liveAmazonAdapter.search("Samsung 990 EVO")
 
         assertEquals(1, results.size)
-        val listing = results.first()
-        assertEquals(SourceType.LIVE, listing.sourceType)
-        assertEquals(ListingOrigin.LIVE_API, listing.listingOrigin)
-        assertTrue(listing.isLive)
-        assertTrue(listing.isLiveApi)
-        assertFalse(listing.isDemo)
-        assertEquals("[LIVE | EXACT | LIVE API]", listing.provenanceTag)
+        val searchListing = results.first()
+        assertEquals(ListingOrigin.DIRECT_SEARCH_URL, searchListing.listingOrigin)
+        assertNull(searchListing.price)
+        assertFalse(searchListing.hasVerifiedPrice)
+
+        // Genuine LIVE_API listing provenance tagging check
+        val liveApiListing = MerchantListing(
+            id = "amazon_live_990",
+            merchantName = "Amazon India",
+            merchantDomain = "amazon.in",
+            title = "Samsung 990 EVO 1TB SSD",
+            price = 5499.0,
+            productUrl = "https://www.amazon.in/dp/B0CX23VFP2",
+            imageUrl = "",
+            matchType = MatchType.EXACT,
+            confidence = 0.99f,
+            availability = AvailabilityStatus.IN_STOCK,
+            sourceType = SourceType.LIVE,
+            listingOrigin = ListingOrigin.LIVE_API,
+            lastVerifiedAt = System.currentTimeMillis()
+        )
+        assertTrue(liveApiListing.isLive)
+        assertTrue(liveApiListing.isLiveApi)
+        assertFalse(liveApiListing.isDemo)
+        assertEquals("[LIVE | EXACT | LIVE API]", liveApiListing.provenanceTag)
     }
 
     @Test
@@ -254,9 +273,9 @@ class MerchantAdaptersTest {
         assertTrue(flipkartListings.isNotEmpty())
         assertTrue(cromaListings.isNotEmpty())
 
-        assertEquals(5499.0, flipkartListings.first().price, 0.001)
-        assertEquals(5799.0, amazonListings.first().price, 0.001)
-        assertEquals(5899.0, cromaListings.first().price, 0.001)
+        assertEquals(5499.0, flipkartListings.first().price ?: 0.0, 0.001)
+        assertEquals(5799.0, amazonListings.first().price ?: 0.0, 0.001)
+        assertEquals(5899.0, cromaListings.first().price ?: 0.0, 0.001)
     }
 
     @Test
@@ -313,19 +332,20 @@ class MerchantAdaptersTest {
         assertNotNull(summary)
 
         // The lowest price must NOT be the 299.0 cable, but the lowest EXACT match (Flipkart 5499.0)!
-        assertEquals("Flipkart", summary!!.lowestPriceListing.merchantName)
-        assertEquals(5499.0, summary.lowestPrice, 0.001)
-        assertEquals(5999.0, summary.highestPrice, 0.001)
+        assertEquals("Flipkart", summary!!.lowestPriceListing?.merchantName)
+        assertEquals(5499.0, summary.lowestPrice ?: 0.0, 0.001)
+        assertEquals(5999.0, summary.highestPrice ?: 0.0, 0.001)
         assertEquals(500.0, summary.maxSavings, 0.001)
         assertEquals(2, summary.exactMatchCount)
+        assertTrue(summary.hasComparableBestPrice)
 
         // Sorted listings must place EXACT matches first
         assertEquals(MatchType.EXACT, summary.listings[0].matchType)
-        assertEquals(5499.0, summary.listings[0].price, 0.001)
+        assertEquals(5499.0, summary.listings[0].price ?: 0.0, 0.001)
         assertEquals(MatchType.EXACT, summary.listings[1].matchType)
-        assertEquals(5999.0, summary.listings[1].price, 0.001)
+        assertEquals(5999.0, summary.listings[1].price ?: 0.0, 0.001)
         assertEquals(MatchType.SIMILAR, summary.listings[2].matchType)
-        assertEquals(299.0, summary.listings[2].price, 0.001)
+        assertEquals(299.0, summary.listings[2].price ?: 0.0, 0.001)
     }
 
     @Test

@@ -43,12 +43,18 @@ class ProductUrlExtractor(
 
         val pathSegments = uri?.path?.split("/")?.filter { it.isNotBlank() } ?: emptyList()
 
-        // Look for slug: usually the longest path segment with letters and hyphens
+        // Look for slug: usually the longest path segment with letters and hyphens,
+        // explicitly excluding image filenames or capture artifacts.
         val slugCandidate = pathSegments
-            .filter { segment -> segment.contains("-") || segment.length > 5 }
+            .filter { segment ->
+                (segment.contains("-") || segment.length > 5) &&
+                    !SearchQueryBuilder.isNonProductNoise(segment)
+            }
             .maxByOrNull { it.length }
 
-        val title = slugCandidate?.let { MerchantUrlHelper.slugToTitle(it) }
+        val title = slugCandidate
+            ?.let { SearchQueryBuilder.sanitizeComponent(MerchantUrlHelper.slugToTitle(it)) }
+            ?.takeIf { it.isNotBlank() && !SearchQueryBuilder.isNonProductNoise(it) }
 
         // Look for ID segment: numeric or alphanumeric code
         val idCandidate = pathSegments.findLast { segment ->
