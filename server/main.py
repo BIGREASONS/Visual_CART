@@ -5,6 +5,7 @@ and Multimodal Product Recognition AI Proxy.
 """
 
 import os
+import re
 import time
 import base64
 import uuid
@@ -254,10 +255,31 @@ class ConfigResponse(BaseModel):
     deep_link_scheme: Optional[str] = Field(default="paypalvisualcart", description="Deep link return scheme")
 
 
+def get_gemini_api_key() -> str:
+    return os.getenv("GEMINI_API_KEY", "").strip()
+
+
+def _is_generic_image_hint(hint: Optional[str]) -> bool:
+    if not hint:
+        return True
+    cleaned = hint.strip().lower()
+    if not cleaned:
+        return True
+    if cleaned in {"shared product", "shared image", "image", "photo", "screenshot", "picture"}:
+        return True
+    if re.search(r"\.(jpe?g|png|webp|gif|bmp|heic|heif)$", cleaned):
+        return True
+    if re.match(r"^(shared[-_\s]?image(?:[-_\s()]*\d+)*|share[-_\s]?[\d_-]+|img[-_\s]?[\d_-]+|pxl[-_\s]?[\d_-]+|screenshot[-_\s]?.*|photo[-_\s]?[\d_-]+|media[-_\s]?[\d_-]+|content://.*|[\d_-]+)$", cleaned):
+        return True
+    return False
+
+
 class RecognizeProductRequest(BaseModel):
     image_base64: Optional[str] = Field(default=None, description="Base64-encoded image data")
     mime_type: str = Field(default="image/jpeg", description="MIME type of image")
     hint_text: Optional[str] = Field(default=None, description="OCR text, page title, or search prompt")
+    text: Optional[str] = Field(default=None, description="Alias for client text query")
+    context_text: Optional[str] = Field(default=None, description="Alias for client share context text")
 
 
 class RecognizedProductResponse(BaseModel):
@@ -931,9 +953,12 @@ async def recognize_product(req: RecognizeProductRequest):
     If GEMINI_API_KEY is not configured, provides deterministic parsing of hint_text.
     """
     # 1. If Gemini API key is configured, invoke Gemini multimodal model (gemini-2.5-flash)
-    if GEMINI_API_KEY:
+    gemini_api_key = get_gemini_api_key()
+    effective_hint = (req.hint_text or req.text or req.context_text or "").strip()
+
+    if gemini_api_key:
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={GEMINI_API_KEY}"
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent?key={gemini_api_key}"
 
         prompt = (
             "You are an e-commerce product recognition engine for PayPal Visual Cart. "
@@ -943,8 +968,8 @@ async def recognize_product(req: RecognizeProductRequest):
         )
 
         parts = [{"text": prompt}]
-        if req.hint_text:
-            parts.append({"text": f"Context/Text: {req.hint_text}"})
+        if effective_hint and not _is_generic_image_hint(effective_hint):
+            parts.append({"text": f"Context/Text: {effective_hint}"})
 
         if req.image_base64:
             parts.append({
@@ -983,19 +1008,38 @@ async def recognize_product(req: RecognizeProductRequest):
                 return RecognizedProductResponse(
                     title=parsed.get("title", "Recognized Product"),
                     brand=parsed.get("brand"),
-                    category=parsed.get("category", "Electronics"),
+                    category=parsed.get("category", "General"),
                     estimated_price=parsed.get("estimated_price"),
                     currency=DEFAULT_CURRENCY,
                     specifications=parsed.get("specifications", {}),
-                    match_reason=parsed.get("match_reason", "Identified via Gemini 1.5 Flash multimodal vision."),
+                    match_reason=parsed.get("match_reason", "Identified via Gemini 2.5 Flash multimodal vision."),
                     confidence=0.96,
                     source="gemini_cloud",
                 )
             except Exception as e:
                 logger.warning(f"Gemini API request failed ({str(e)}), falling back to local heuristic parser.")
 
-    # 2. Local heuristic fallback parser
-    text = (req.hint_text or "Samsung 990 EVO 1TB NVMe SSD").strip()
+    # 2. Do not hallucinate a fake Samsung SSD or generic filename when an image is shared without Gemini Vision
+    if req.image_base64 and _is_generic_image_hint(effective_hint):
+        reason = (
+            "Visual AI image recognition did not identify this image. Please enter the product name manually."
+            if gemini_api_key
+            else "Visual AI requires GEMINI_API_KEY in backend .env. Please enter the product name manually."
+        )
+        return RecognizedProductResponse(
+            title="Unidentified Product",
+            brand="",
+            category="Unidentified",
+            estimated_price=None,
+            currency=DEFAULT_CURRENCY,
+            specifications={},
+            match_reason=reason,
+            confidence=0.1,
+            source="needs_gemini_key" if not gemini_api_key else "vision_unidentified",
+        )
+
+    # 3. Local heuristic fallback parser
+    text = (effective_hint or "Samsung 990 EVO 1TB NVMe SSD").strip()
     brand = None
     category = "General"
     specs = {}
@@ -1049,6 +1093,7 @@ async def health_check():
         "status": "healthy",
         "service": "paypal-visual-cart-backend",
         "has_paypal_credentials": has_live_paypal_credentials(),
+        "has_gemini_api_key": bool(get_gemini_api_key()),
         "mode": PAYPAL_MODE,
         "timestamp": time.time(),
     }

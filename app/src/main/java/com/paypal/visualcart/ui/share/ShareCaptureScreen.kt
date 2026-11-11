@@ -27,17 +27,28 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,6 +58,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -102,6 +114,13 @@ sealed interface ShareCaptureUiState {
     ) : ShareCaptureUiState
 
     data class Error(val message: String) : ShareCaptureUiState
+
+    data class NeedsQuery(
+        val thumbnail: Bitmap? = null,
+        val message: String,
+        val suggestedQuery: String = "",
+        val imageUri: String? = null
+    ) : ShareCaptureUiState
 }
 
 @Composable
@@ -112,6 +131,8 @@ fun ShareCaptureDialog(
     onAddToCart: (MerchantListing) -> Unit,
     onViewInStore: (String) -> Unit,
     onOpenFullCart: () -> Unit,
+    onSubmitManualQuery: (String) -> Unit = {},
+    onEditQuery: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // Dimmed background scrim
@@ -146,12 +167,20 @@ fun ShareCaptureDialog(
                     is ShareCaptureUiState.Loading -> {
                         ShareLoadingContent(state = uiState)
                     }
+                    is ShareCaptureUiState.NeedsQuery -> {
+                        ShareNeedsQueryContent(
+                            state = uiState,
+                            onSubmitQuery = onSubmitManualQuery,
+                            onDismiss = onDismiss
+                        )
+                    }
                     is ShareCaptureUiState.Matched -> {
                         ShareMatchedContent(
                             state = uiState,
                             onSelectListing = onSelectListing,
                             onAddToCart = onAddToCart,
-                            onViewInStore = onViewInStore
+                            onViewInStore = onViewInStore,
+                            onEditQuery = onEditQuery
                         )
                     }
                     is ShareCaptureUiState.Saved -> {
@@ -286,8 +315,12 @@ private fun ShareMatchedContent(
     state: ShareCaptureUiState.Matched,
     onSelectListing: (MerchantListing) -> Unit,
     onAddToCart: (MerchantListing) -> Unit,
-    onViewInStore: (String) -> Unit
+    onViewInStore: (String) -> Unit,
+    onEditQuery: () -> Unit = {}
 ) {
+    val allListings = (state.exactListings + state.similarListings).distinctBy { it.id }
+    val hasVerifiedPricing = allListings.any { !it.isDirectSearchUrl }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         // Product Hero Row
         Row(
@@ -312,15 +345,33 @@ private fun ShareMatchedContent(
             }
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = state.product.title,
-                    style = VisualCartTypography.titleSmall.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = DeepInk
-                    ),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = state.product.title,
+                        style = VisualCartTypography.titleSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = DeepInk
+                        ),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(
+                        onClick = onEditQuery,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "Edit product query",
+                            tint = ForestGreen,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     state.product.brand?.let { SpecTag(spec = it) }
@@ -335,49 +386,80 @@ private fun ShareMatchedContent(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Best Price Found Banner
-        val savings = (state.exactListings.maxOfOrNull { it.price } ?: state.bestListing.price) - state.bestListing.price
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(ForestGreenLight)
-                .border(1.dp, ForestGreen.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column {
-                Text(
-                    text = "BEST PRICE FOUND",
-                    style = VisualCartTypography.labelSmall.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = ForestGreen,
-                        letterSpacing = 0.8.sp
-                    )
-                )
-                Text(
-                    text = "${state.bestListing.merchantName} · ₹${state.bestListing.price.toInt()}",
-                    style = VisualCartTypography.bodyMedium.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = DeepInk
-                    )
-                )
-            }
-
-            if (savings > 0) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Terracotta)
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                ) {
+        if (hasVerifiedPricing) {
+            val verifiedListings = allListings.filter { !it.isDirectSearchUrl }
+            val savings = ((verifiedListings.maxOfOrNull { it.price } ?: state.bestListing.price) - state.bestListing.price)
+                .coerceAtLeast(0.0)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(ForestGreenLight)
+                    .border(1.dp, ForestGreen.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
                     Text(
-                        text = "Save ₹${savings.toInt()}",
+                        text = "BEST PRICE FOUND",
                         style = VisualCartTypography.labelSmall.copy(
                             fontWeight = FontWeight.Bold,
-                            color = PureWhite
+                            color = ForestGreen,
+                            letterSpacing = 0.8.sp
                         )
+                    )
+                    Text(
+                        text = "${state.bestListing.merchantName} · ₹${state.bestListing.price.toInt()}",
+                        style = VisualCartTypography.bodyMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = DeepInk
+                        )
+                    )
+                }
+
+                if (savings > 0) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Terracotta)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "Save ₹${savings.toInt()}",
+                            style = VisualCartTypography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = PureWhite
+                            )
+                        )
+                    }
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(StoneLight)
+                    .border(1.dp, Stone, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "LIVE STORE SEARCH LINKS",
+                        style = VisualCartTypography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = DeepInk,
+                            letterSpacing = 0.8.sp
+                        )
+                    )
+                    Text(
+                        text = "Tap any ↗ icon to view real results for \"${state.product.title}\"",
+                        style = VisualCartTypography.bodySmall.copy(color = MutedSlate),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -396,18 +478,17 @@ private fun ShareMatchedContent(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        val allListings = state.exactListings + state.similarListings
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = 240.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(allListings) { listing ->
+            items(allListings, key = { it.id }) { listing ->
                 ShareMerchantCard(
                     listing = listing,
-                    isSelected = listing == state.selectedListing,
-                    isLowest = listing == state.bestListing,
+                    isSelected = listing.id == state.selectedListing.id,
+                    isLowest = hasVerifiedPricing && listing.id == state.bestListing.id,
                     onSelect = { onSelectListing(listing) },
                     onViewInStore = { onViewInStore(listing.productUrl) }
                 )
@@ -418,7 +499,11 @@ private fun ShareMatchedContent(
 
         // Primary Action: Add to Visual Cart
         VisualCartButton(
-            text = "ADD TO VISUAL CART (₹${state.selectedListing.price.toInt()})",
+            text = if (state.selectedListing.isDirectSearchUrl) {
+                "ADD TO VISUAL CART (~₹${state.selectedListing.price.toInt()})"
+            } else {
+                "ADD TO VISUAL CART (₹${state.selectedListing.price.toInt()})"
+            },
             onClick = { onAddToCart(state.selectedListing) },
             variant = ButtonVariant.PRIMARY,
             icon = VisualCartIcons.Cart,
@@ -479,6 +564,8 @@ private fun ShareMerchantCard(
                 Spacer(modifier = Modifier.width(4.dp))
                 if (listing.isLive) {
                     LiveInferenceBadge(text = "LIVE")
+                } else if (listing.isDirectSearchUrl) {
+                    SpecTag(spec = "SEARCH LINK")
                 } else if (listing.isDemo) {
                     DemoDataBadge()
                 }
@@ -488,13 +575,17 @@ private fun ShareMerchantCard(
 
             Row(verticalAlignment = Alignment.Bottom) {
                 Text(
-                    text = "₹${listing.price.toInt()}",
+                    text = if (listing.isDirectSearchUrl) {
+                        "Est. ₹${listing.price.toInt()}"
+                    } else {
+                        "₹${listing.price.toInt()}"
+                    },
                     style = VisualCartTypography.titleSmall.copy(
                         fontWeight = FontWeight.Bold,
                         color = if (isLowest) ForestGreen else DeepInk
                     )
                 )
-                if (listing.originalPrice != null && listing.originalPrice > listing.price) {
+                if (!listing.isDirectSearchUrl && listing.originalPrice != null && listing.originalPrice > listing.price) {
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = "₹${listing.originalPrice.toInt()}",
@@ -620,6 +711,95 @@ private fun ShareSavedContent(
                 variant = ButtonVariant.PRIMARY,
                 icon = VisualCartIcons.Cart,
                 modifier = Modifier.weight(1.2f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ShareNeedsQueryContent(
+    state: ShareCaptureUiState.NeedsQuery,
+    onSubmitQuery: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember(state.suggestedQuery) { mutableStateOf(state.suggestedQuery) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        if (state.thumbnail != null) {
+            Image(
+                bitmap = state.thumbnail.asImageBitmap(),
+                contentDescription = "Captured product preview",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(104.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .border(1.5.dp, ForestGreen.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        Text(
+            text = "Identify This Product",
+            style = VisualCartTypography.titleMedium.copy(
+                fontWeight = FontWeight.Bold,
+                color = DeepInk
+            )
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = state.message,
+            style = VisualCartTypography.bodySmall.copy(
+                color = MutedSlate,
+                lineHeight = 16.sp
+            )
+        )
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            label = { Text("Product name or keywords") },
+            placeholder = { Text("e.g. PVC Plastic Pipes, Sony headphones") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(
+                onSearch = {
+                    if (query.isNotBlank()) onSubmitQuery(query)
+                }
+            ),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = ForestGreen,
+                focusedLabelColor = ForestGreen,
+                cursorColor = ForestGreen
+            ),
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            VisualCartButton(
+                text = "Cancel",
+                onClick = onDismiss,
+                variant = ButtonVariant.SECONDARY,
+                modifier = Modifier.weight(0.9f)
+            )
+            VisualCartButton(
+                text = "Search Stores",
+                onClick = { if (query.isNotBlank()) onSubmitQuery(query) },
+                variant = ButtonVariant.PRIMARY,
+                icon = Icons.Default.Search,
+                modifier = Modifier.weight(1.4f)
             )
         }
     }

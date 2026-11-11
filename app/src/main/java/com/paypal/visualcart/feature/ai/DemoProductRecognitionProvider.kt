@@ -16,6 +16,26 @@ class DemoProductRecognitionProvider(
     companion object {
         const val PROVIDER_NAME = "PayPal Demo & On-Device AI Provider"
 
+        private val GENERIC_CAPTURE_REGEX = Regex(
+            "^(shared[-_\\s]?image(?:[-_\\s()]*\\d+)*|share[-_\\s]?[\\d_-]+|img[-_\\s]?[\\d_-]+|pxl[-_\\s]?[\\d_-]+|screenshot.*|photo[-_\\s]?[\\d_-]+|media[-_\\s]?[\\d_-]+|image|photo|picture|shared product|[\\d_-]+)(\\.(jpe?g|png|webp|gif|bmp|heic|heif))?$",
+            RegexOption.IGNORE_CASE
+        )
+        private val IMAGE_EXT_REGEX = Regex("^.*\\.(jpe?g|png|webp|gif|bmp|heic|heif)$", RegexOption.IGNORE_CASE)
+
+        fun isGenericCaptureText(raw: String?): Boolean {
+            val cleaned = raw?.trim().orEmpty()
+            if (cleaned.isBlank()) return true
+            if (cleaned.startsWith("content://", ignoreCase = true) || cleaned.startsWith("file://", ignoreCase = true)) {
+                return true
+            }
+            if (GENERIC_CAPTURE_REGEX.matches(cleaned)) return true
+            if (IMAGE_EXT_REGEX.matches(cleaned)) {
+                val stem = cleaned.substringBeforeLast(".")
+                if (stem.isBlank() || GENERIC_CAPTURE_REGEX.matches(stem)) return true
+            }
+            return false
+        }
+
         val FIXTURE_SAMSUNG_SSD = RecognizedProduct(
             id = "demo-fix-samsung-990-evo",
             title = "Samsung 990 EVO 1TB NVMe M.2 SSD",
@@ -186,8 +206,29 @@ class DemoProductRecognitionProvider(
             )
         }
 
+        val candidateHint = contextText?.takeIf { !isGenericCaptureText(it) }
+            ?: imageUri.substringAfterLast("/").substringBeforeLast(".")
+                .takeIf { !isGenericCaptureText(it) }
+
+        if (candidateHint.isNullOrBlank()) {
+            return RecognizedProduct(
+                id = "unidentified_${System.currentTimeMillis()}",
+                title = "Unidentified Product",
+                brand = null,
+                category = "Unidentified",
+                specifications = emptyMap(),
+                confidence = 0.10f,
+                imageUrl = imageUri,
+                rawTextSnippet = contextText.orEmpty(),
+                matchType = MatchType.SIMILAR,
+                matchReason = "Image could not be identified offline. Configure GEMINI_API_KEY in backend .env for automatic vision, or enter the product name manually.",
+                isDemoFixture = false,
+                isLiveInference = false
+            )
+        }
+
         return localParser.parse(
-            rawText = contextText ?: imageUri.substringAfterLast("/").substringBeforeLast("."),
+            rawText = candidateHint,
             imageUrl = imageUri
         )
     }

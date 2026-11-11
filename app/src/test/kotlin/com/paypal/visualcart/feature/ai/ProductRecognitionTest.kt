@@ -155,4 +155,42 @@ class ProductRecognitionTest {
         assertEquals(DemoProductRecognitionProvider.FIXTURE_SAMSUNG_SSD.id, product.id)
         assertTrue(product.isDemoFixture)
     }
+
+    @Test
+    fun testNonElectronicsProductDoesNotDefaultToElectronicsCategory() {
+        val parsed = LocalProductParser.parse("PVC Plastic Water Pipes 2 inch")
+        assertEquals("General", parsed.category)
+        assertEquals("PVC Plastic Water Pipes 2 inch", parsed.title)
+    }
+
+    @Test
+    fun testCloudProviderTreatsNeedsGeminiKeyResponseAsUnidentified() {
+        val provider = CloudProductUnderstandingProvider(
+            apiKey = null,
+            endpointUrl = "http://localhost:8000/api/v1/ai/recognize-product",
+            networkTransport = NetworkTransport { _, _, _ ->
+                NetworkResponse(
+                    statusCode = 200,
+                    body = """
+                        {
+                          "title": "Unidentified Product",
+                          "brand": "",
+                          "category": "Unidentified",
+                          "estimated_price": null,
+                          "confidence": 0.1,
+                          "match_reason": "Visual AI requires GEMINI_API_KEY in backend .env.",
+                          "source": "needs_gemini_key"
+                        }
+                    """.trimIndent()
+                )
+            }
+        )
+        val result = runBlocking {
+            provider.recognizeFromImage("/tmp/share_1.jpg", contextText = null)
+        }
+        assertEquals("Unidentified Product", result.title)
+        assertEquals("Unidentified", result.category)
+        assertFalse(result.isLiveInference)
+        assertFalse(result.isDemoFixture)
+    }
 }

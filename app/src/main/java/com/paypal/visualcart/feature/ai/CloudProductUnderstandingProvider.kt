@@ -1,10 +1,13 @@
 package com.paypal.visualcart.feature.ai
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import com.paypal.visualcart.domain.model.MatchResult
 import com.paypal.visualcart.domain.model.MatchType
 import com.paypal.visualcart.domain.model.RecognizedProduct
 import com.paypal.visualcart.domain.model.StructuredAiProduct
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
@@ -33,7 +36,7 @@ data class NetworkResponse(
  */
 class DefaultHttpNetworkTransport(
     private val connectTimeoutMs: Int = 5000,
-    private val readTimeoutMs: Int = 8000
+    private val readTimeoutMs: Int = 15000
 ) : NetworkTransport {
     override fun post(url: String, headers: Map<String, String>, body: String): NetworkResponse {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -77,13 +80,24 @@ class CloudProductUnderstandingProvider(
     private val endpointUrl: String? = resolveEndpointUrl(),
     private val modelName: String = resolveModelName(),
     private val fallbackProvider: ProductUnderstandingProvider = DemoProductRecognitionProvider(),
-    private val networkTransport: NetworkTransport = DefaultHttpNetworkTransport()
+    private val networkTransport: NetworkTransport = DefaultHttpNetworkTransport(),
+    private val autoDetectBackendEndpoint: Boolean = false
 ) : ProductUnderstandingProvider {
+
+    @Volatile
+    private var cachedBackendEndpointUrl: String? = null
 
     companion object {
         const val PROVIDER_NAME = "PayPal Cloud Multimodal AI (Gemini 2.5 / Proxy)"
         const val DEFAULT_MODEL = "gemini-2.5-flash"
         const val BACKEND_PROXY_PATH = "/api/v1/ai/recognize-product"
+        private val BACKEND_CANDIDATE_URLS = listOf(
+            "http://localhost:8000",
+            "http://10.0.2.2:8000"
+        )
+
+        fun forBackend(): CloudProductUnderstandingProvider =
+            CloudProductUnderstandingProvider(autoDetectBackendEndpoint = true)
 
         private const val ENV_GEMINI_KEY = "GEMINI_API_KEY"
         private const val ENV_PROXY_ENDPOINT = "VISUAL_CART_AI_ENDPOINT"
@@ -115,7 +129,34 @@ class CloudProductUnderstandingProvider(
      * Checks if the cloud provider has credentials or endpoint configured.
      */
     fun isCloudConfigured(): Boolean {
-        return !apiKey.isNullOrBlank() || !endpointUrl.isNullOrBlank()
+        return !apiKey.isNullOrBlank() || !endpointUrl.isNullOrBlank() || autoDetectBackendEndpoint
+    }
+
+    internal fun resolveActiveEndpointUrl(): String? {
+        if (!endpointUrl.isNullOrBlank()) return endpointUrl
+        if (!autoDetectBackendEndpoint) return null
+        cachedBackendEndpointUrl?.let { return it }
+
+        for (baseUrl in BACKEND_CANDIDATE_URLS) {
+            try {
+                val url = java.net.URL("$baseUrl/health")
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 900
+                    readTimeout = 900
+                }
+                val code = conn.responseCode
+                conn.disconnect()
+                if (code in 200..299) {
+                    val resolved = "$baseUrl$BACKEND_PROXY_PATH"
+                    cachedBackendEndpointUrl = resolved
+                    return resolved
+                }
+            } catch (_: Throwable) {
+                // Probe next candidate
+            }
+        }
+        return null
     }
 
     override suspend fun recognizeFromText(text: String): RecognizedProduct {
@@ -160,11 +201,13 @@ class CloudProductUnderstandingProvider(
     // ---------------------------------------------------------------------------------------------
 
     private fun executeTextInference(text: String): RecognizedProduct? {
-        val proxy = endpointUrl
+        val proxy = resolveActiveEndpointUrl()
         val targetUrl = if (!proxy.isNullOrBlank()) {
             proxy
-        } else {
+        } else if (!apiKey.isNullOrBlank()) {
             "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
+        } else {
+            return null
         }
 
         val requestBody = if (!proxy.isNullOrBlank()) {
@@ -200,12 +243,14 @@ class CloudProductUnderstandingProvider(
 
     private fun executeImageInference(imageUri: String, contextText: String?): RecognizedProduct? {
         val imagePayload = resolveImagePayload(imageUri)
-        val proxy = endpointUrl
+        val proxy = resolveActiveEndpointUrl()
 
         val targetUrl = if (!proxy.isNullOrBlank()) {
             proxy
-        } else {
+        } else if (!apiKey.isNullOrBlank()) {
             "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
+        } else {
+            return null
         }
 
         val requestBody = if (!proxy.isNullOrBlank()) {
@@ -224,7 +269,7 @@ class CloudProductUnderstandingProvider(
             return null
         }
 
-        val structured = parseStructuredProduct(response.body, fallbackText = contextText ?: imageUri)
+        val structured = parseStructuredProduct(response.body, fallbackText = contextText.orEmpty())
         if (structured != null) {
             return toRecognizedProduct(structured, imageUri = imageUri, contextText = contextText)
         }
@@ -280,8 +325,8 @@ class CloudProductUnderstandingProvider(
             matchReason = structured.matchReason.ifBlank {
                 "Multimodal AI recognized $brandPart${structured.productName} (${(confidence * 100).toInt()}% confidence)."
             },
-            isDemoFixture = false,
-            isLiveInference = true,
+            isDemoFixture = structured.isDemoFixture,
+            isLiveInference = structured.isLiveInference,
             colour = structured.colour,
             model = structured.model
         )
@@ -298,6 +343,13 @@ class CloudProductUnderstandingProvider(
     ): String {
         val fields = mutableListOf<String>()
 
+        val effectiveHint = listOfNotNull(
+            text?.takeIf { it.isNotBlank() },
+            contextText?.takeIf { it.isNotBlank() }
+        ).distinct().joinToString(" - ")
+        if (effectiveHint.isNotBlank()) {
+            fields.add("\"hint_text\":\"${escapeJson(effectiveHint)}\"")
+        }
         if (!text.isNullOrBlank()) {
             fields.add("\"text\":\"${escapeJson(text)}\"")
         }
@@ -397,14 +449,19 @@ class CloudProductUnderstandingProvider(
         val file = File(filePath)
         if (file.exists() && file.isFile && file.length() > 0) {
             try {
-                val bytes = file.readBytes()
+                val compressed = compressLargeImageIfPossible(file)
+                val bytes = compressed ?: file.readBytes()
                 val b64 = Base64.getEncoder().encodeToString(bytes)
                 val ext = file.extension.lowercase()
-                val mime = when (ext) {
-                    "png" -> "image/png"
-                    "webp" -> "image/webp"
-                    "heic", "heif" -> "image/heic"
-                    else -> "image/jpeg"
+                val mime = if (compressed != null) {
+                    "image/jpeg"
+                } else {
+                    when (ext) {
+                        "png" -> "image/png"
+                        "webp" -> "image/webp"
+                        "heic", "heif" -> "image/heic"
+                        else -> "image/jpeg"
+                    }
                 }
                 return ImagePayload(base64Data = b64, mimeType = mime)
             } catch (_: Exception) {
@@ -418,6 +475,44 @@ class CloudProductUnderstandingProvider(
         }
 
         return ImagePayload(remoteUrl = trimmed)
+    }
+
+    private fun compressLargeImageIfPossible(file: File, maxBytes: Long = 512_000L, maxDim: Int = 1024): ByteArray? {
+        if (file.length() <= maxBytes) return null
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            val width = bounds.outWidth
+            val height = bounds.outHeight
+            if (width <= 0 || height <= 0) return null
+
+            var sampleSize = 1
+            while (width / sampleSize > maxDim * 2 || height / sampleSize > maxDim * 2) {
+                sampleSize *= 2
+            }
+
+            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            val decoded = BitmapFactory.decodeFile(file.absolutePath, opts) ?: return null
+            val longest = maxOf(decoded.width, decoded.height)
+            val scaled = if (longest > maxDim) {
+                val scale = maxDim.toFloat() / longest.toFloat()
+                val targetW = (decoded.width * scale).toInt().coerceAtLeast(1)
+                val targetH = (decoded.height * scale).toInt().coerceAtLeast(1)
+                Bitmap.createScaledBitmap(decoded, targetW, targetH, true).also {
+                    if (it !== decoded) decoded.recycle()
+                }
+            } else {
+                decoded
+            }
+
+            ByteArrayOutputStream().use { out ->
+                scaled.compress(Bitmap.CompressFormat.JPEG, 82, out)
+                scaled.recycle()
+                out.toByteArray()
+            }
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -493,7 +588,7 @@ class CloudProductUnderstandingProvider(
                 ?: fallbackText.takeIf { it.isNotBlank() }
                 ?: return null
 
-            val category = targetMap["category"]?.toString()?.takeIf { it.isNotBlank() && it != "null" } ?: "Electronics"
+            val category = targetMap["category"]?.toString()?.takeIf { it.isNotBlank() && it != "null" } ?: "General"
             val colour = (targetMap["colour"] ?: targetMap["color"])?.toString()?.takeIf { it.isNotBlank() && it != "null" }
             val model = (targetMap["model"] ?: targetMap["model_number"] ?: targetMap["modelNumber"])?.toString()?.takeIf { it.isNotBlank() && it != "null" }
 
@@ -523,8 +618,18 @@ class CloudProductUnderstandingProvider(
             val matchReason = targetMap["match_reason"]?.toString()
                 ?: "Multimodal AI identified ${brand ?: ""} $productName with ${(confidence * 100).toInt()}% confidence."
 
+            val source = targetMap["source"]?.toString()?.lowercase()
+            val isUnidentified = source == "needs_gemini_key" ||
+                source == "vision_unidentified" ||
+                productName.equals("Unidentified Product", ignoreCase = true) ||
+                category.equals("Unidentified", ignoreCase = true)
+
             val isDemo = targetMap["is_demo_fixture"] as? Boolean ?: false
-            val isLive = targetMap["is_live_inference"] as? Boolean ?: (!isDemo)
+            val isLive = if (isUnidentified) {
+                false
+            } else {
+                targetMap["is_live_inference"] as? Boolean ?: (!isDemo)
+            }
 
             StructuredAiProduct(
                 brand = brand,

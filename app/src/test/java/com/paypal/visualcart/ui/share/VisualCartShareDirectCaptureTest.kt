@@ -111,4 +111,44 @@ class VisualCartShareDirectCaptureTest {
         assertNotNull(extractedUrl)
         assertEquals("https://www.amazon.in/dp/B0POLAGOMAXI", extractedUrl)
     }
+
+    @Test
+    fun testGenericSharedImageFilenameDoesNotHallucinateProduct() {
+        val provider = com.paypal.visualcart.feature.ai.DemoProductRecognitionProvider()
+        assertTrue(com.paypal.visualcart.feature.ai.DemoProductRecognitionProvider.isGenericCaptureText("shared image.jpg"))
+        assertTrue(com.paypal.visualcart.feature.ai.DemoProductRecognitionProvider.isGenericCaptureText("IMG_20261111_085200.jpg"))
+        org.junit.Assert.assertFalse(com.paypal.visualcart.feature.ai.DemoProductRecognitionProvider.isGenericCaptureText("PVC Plastic Pipes"))
+
+        val recognized = kotlinx.coroutines.runBlocking {
+            provider.recognizeFromImage(
+                imageUri = "/data/user/0/com.paypal.visualcart/cache/share_captures/share_123.jpg",
+                contextText = "shared image.jpg"
+            )
+        }
+        assertEquals("Unidentified Product", recognized.title)
+        assertEquals("Unidentified", recognized.category)
+        org.junit.Assert.assertFalse(recognized.isLiveInference)
+    }
+
+    @Test
+    fun testMerchantListingPartitionHasNoDuplicateMerchants() {
+        val engine = com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine()
+        val listings = kotlinx.coroutines.runBlocking {
+            engine.searchAll("PVC Plastic Pipes")
+        }
+        val unique = listings.distinctBy { it.id }
+        val exact = unique.filter { it.matchType == com.paypal.visualcart.domain.model.MatchType.EXACT }
+            .ifEmpty { unique.take(3) }
+        val exactIds = exact.mapTo(mutableSetOf()) { it.id }
+        val similar = unique.filterNot { it.id in exactIds }
+
+        val combined = exact + similar
+        assertEquals(unique.size, combined.size)
+        assertEquals(combined.size, combined.map { it.id }.toSet().size)
+
+        // Ensure synthesized fallback listings no longer have ₹10,000+ fake price spreads
+        val minPrice = combined.minOf { it.price }
+        val maxPrice = combined.maxOf { it.price }
+        assertTrue("Expected tight synthetic estimate range, got spread ${maxPrice - minPrice}", (maxPrice - minPrice) < 1000.0)
+    }
 }

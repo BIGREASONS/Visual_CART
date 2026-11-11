@@ -37,10 +37,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -73,7 +75,11 @@ import com.paypal.visualcart.core.designsystem.VisualCartCard
 import com.paypal.visualcart.core.designsystem.VisualCartIcons
 import com.paypal.visualcart.core.designsystem.VisualCartTypography
 import com.paypal.visualcart.core.designsystem.WarmIvory
+import com.paypal.visualcart.data.local.VisualCartDatabase
+import com.paypal.visualcart.data.repository.CartRepositoryImpl
 import com.paypal.visualcart.domain.model.MatchType
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 data class CartItemUiModel(
     val id: String,
@@ -88,7 +94,8 @@ data class CartItemUiModel(
     val matchType: MatchType,
     val confidence: Float,
     val otherMerchants: List<String> = emptyList(),
-    val isDemo: Boolean = true
+    val isDemo: Boolean = true,
+    val isSavedFromDb: Boolean = false
 ) {
     val savings: Double?
         get() = if (originalPrice != null && originalPrice > verifiedPrice) originalPrice - verifiedPrice else null
@@ -110,11 +117,17 @@ fun CartScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val cartRepository = remember(context) {
+        CartRepositoryImpl(VisualCartDatabase.getInstance(context))
+    }
+    val dbProducts by cartRepository.getCartProductsFlow().collectAsState(initial = emptyList())
+
     var selectedFilter by remember { mutableStateOf("All") }
     var selectedSort by remember { mutableStateOf(CartSortOption.RECENT) }
     var showSortMenu by remember { mutableStateOf(false) }
 
-    val cartItems = remember {
+    val demoItems = remember {
         mutableStateListOf(
             CartItemUiModel(
                 id = "crucial-p3-plus-1tb",
@@ -194,12 +207,51 @@ fun CartScreen(
         )
     }
 
-    val filterOptions = listOf("All", "Amazon", "Flipkart", "Croma", "Electronics", "Fashion")
+    val savedCartItems = remember(dbProducts) {
+        dbProducts.map { saved ->
+            val selected = saved.selectedListing ?: saved.lowestPriceListing ?: saved.listings.firstOrNull()
+            val price = selected?.price ?: 0.0
+            val matchEnum = runCatching {
+                MatchType.valueOf(selected?.matchType ?: "EXACT")
+            }.getOrDefault(MatchType.EXACT)
+            val otherNames = saved.listings
+                .filter { it.id != selected?.id }
+                .map { it.merchant }
+                .distinct()
+            val specsSummary = buildList {
+                saved.product.brand?.takeIf { it.isNotBlank() }?.let { add(it) }
+                add("${saved.listings.size.coerceAtLeast(1)} stores")
+            }
+            CartItemUiModel(
+                id = saved.product.id,
+                title = saved.product.title,
+                brand = saved.product.brand ?: "Product",
+                category = saved.product.category,
+                specs = specsSummary,
+                verifiedPrice = price,
+                originalPrice = null,
+                bestMerchant = selected?.merchant ?: saved.product.originalSource ?: "Merchant",
+                productUrl = selected?.productUrl ?: "https://www.amazon.in",
+                matchType = matchEnum,
+                confidence = selected?.confidence ?: 0.85f,
+                otherMerchants = otherNames,
+                isDemo = selected?.sourceType != "LIVE",
+                isSavedFromDb = true
+            )
+        }
+    }
+
+    val cartItems = remember(savedCartItems, demoItems.toList()) {
+        savedCartItems + demoItems
+    }
+
+    val filterOptions = listOf("All", "Saved", "Amazon", "Flipkart", "Croma", "Electronics", "Fashion")
 
     // Filter and Sort logic
     val filteredItems = cartItems.filter { item ->
         when (selectedFilter) {
             "All" -> true
+            "Saved" -> item.isSavedFromDb
             "Amazon" -> item.bestMerchant.contains("Amazon", ignoreCase = true) || item.otherMerchants.any { it.contains("Amazon", ignoreCase = true) }
             "Flipkart" -> item.bestMerchant.contains("Flipkart", ignoreCase = true) || item.otherMerchants.any { it.contains("Flipkart", ignoreCase = true) }
             "Croma" -> item.bestMerchant.contains("Croma", ignoreCase = true) || item.otherMerchants.any { it.contains("Croma", ignoreCase = true) }
@@ -456,7 +508,15 @@ fun CartScreen(
                                 context.startActivity(browserIntent)
                             },
                             onCompare = { onNavigateToDetail(item.id) },
-                            onRemove = { cartItems.remove(item) }
+                            onRemove = {
+                                if (item.isSavedFromDb) {
+                                    coroutineScope.launch(Dispatchers.IO) {
+                                        cartRepository.removeProduct(item.id)
+                                    }
+                                } else {
+                                    demoItems.remove(item)
+                                }
+                            }
                         )
                     }
                 }

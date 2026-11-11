@@ -294,7 +294,7 @@ object LocalProductParser {
             return "Electronics"
         }
 
-        return "Electronics"
+        return "General"
     }
 
     /**

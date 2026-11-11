@@ -36,6 +36,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,11 +75,16 @@ import com.paypal.visualcart.core.designsystem.VisualCartCard
 import com.paypal.visualcart.core.designsystem.VisualCartIcons
 import com.paypal.visualcart.core.designsystem.VisualCartTypography
 import com.paypal.visualcart.core.designsystem.WarmIvory
+import com.paypal.visualcart.data.local.VisualCartDatabase
+import com.paypal.visualcart.data.local.entity.SavedProductWithListings
+import com.paypal.visualcart.data.repository.CartRepositoryImpl
 import com.paypal.visualcart.domain.model.AvailabilityStatus
 import com.paypal.visualcart.domain.model.MatchType
 import com.paypal.visualcart.domain.model.MerchantListing
 import com.paypal.visualcart.domain.model.SourceType
 import com.paypal.visualcart.feature.payment.PayPalCheckoutCoordinator
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun ProductDetailScreen(
@@ -87,68 +93,166 @@ fun ProductDetailScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val cartRepository = remember(context) {
+        CartRepositoryImpl(VisualCartDatabase.getInstance(context))
+    }
+    var savedProduct by remember(productId) { mutableStateOf<SavedProductWithListings?>(null) }
 
-    val canonicalSpecs = remember {
-        listOf(
-            "Capacity" to "1 TB",
-            "Interface" to "PCIe Gen 4.0 x4, NVMe 1.4",
-            "Form Factor" to "M.2 2280",
-            "Seq. Read Speed" to "Up to 5,000 MB/s",
-            "Seq. Write Speed" to "Up to 4,200 MB/s",
-            "NAND Technology" to "Micron 176-layer 3D NAND",
-            "Endurance" to "220 TBW",
-            "Warranty" to "5-Year Manufacturer Warranty",
-            "Model / Part No." to "CT1000P3PSSD8"
-        )
+    LaunchedEffect(productId) {
+        savedProduct = withContext(Dispatchers.IO) {
+            cartRepository.getProductById(productId)
+        }
     }
 
-    val merchantListings = remember {
-        listOf(
-            MerchantDetailListing(
-                name = "Flipkart",
-                price = 5499.0,
-                originalPrice = 6099.0,
-                status = "In Stock",
-                delivery = "Tomorrow, by 2 PM",
-                matchType = MatchType.LIKELY,
-                confidence = 0.92f,
-                isLowest = true,
-                url = "https://www.flipkart.com"
-            ),
-            MerchantDetailListing(
-                name = "Croma",
-                price = 5799.0,
-                originalPrice = 6199.0,
-                status = "In Stock",
-                delivery = "Thursday, Feb 12",
-                matchType = MatchType.EXACT,
-                confidence = 0.95f,
-                isLowest = false,
-                url = "https://www.croma.com"
-            ),
-            MerchantDetailListing(
-                name = "Amazon India",
-                price = 5999.0,
-                originalPrice = 6499.0,
-                status = "In Stock",
-                delivery = "Prime One-Day",
-                matchType = MatchType.EXACT,
-                confidence = 0.98f,
-                isLowest = false,
-                url = "https://www.amazon.in"
-            ),
-            MerchantDetailListing(
-                name = "Reliance Digital",
-                price = 6199.0,
-                originalPrice = 6599.0,
-                status = "Only 2 left",
-                delivery = "Friday, Feb 13",
-                matchType = MatchType.SIMILAR,
-                confidence = 0.82f,
-                isLowest = false,
-                url = "https://www.reliancedigital.in"
+    val productTitle = remember(productId, savedProduct) {
+        savedProduct?.product?.title ?: when (productId) {
+            "sony-wh1000xm5" -> "Sony WH-1000XM5 Noise Cancelling Wireless Headphones"
+            "apple-watch-ultra-2" -> "Apple Watch Ultra 2 GPS + Cellular 49mm Titanium"
+            "nike-air-jordan-1" -> "Nike Air Jordan 1 Low Retro Neutral Grey"
+            "keychron-k2-v2" -> "Keychron K2 V2 Wireless Mechanical Keyboard Hot-Swappable"
+            else -> "Crucial P3 Plus 1TB PCIe 4.0 3D NAND NVMe M.2 SSD"
+        }
+    }
+
+    val productBrand = remember(productId, savedProduct) {
+        savedProduct?.product?.brand?.takeIf { it.isNotBlank() } ?: when (productId) {
+            "sony-wh1000xm5" -> "Sony"
+            "apple-watch-ultra-2" -> "Apple"
+            "nike-air-jordan-1" -> "Nike"
+            "keychron-k2-v2" -> "Keychron"
+            else -> "Crucial"
+        }
+    }
+
+    val productCategory = remember(productId, savedProduct) {
+        savedProduct?.product?.category ?: when (productId) {
+            "apple-watch-ultra-2" -> "Accessories"
+            "nike-air-jordan-1" -> "Fashion"
+            "keychron-k2-v2" -> "Gaming"
+            else -> "Internal SSD"
+        }
+    }
+
+    val canonicalModelLabel = remember(productId, savedProduct) {
+        savedProduct?.product?.canonicalProductId?.uppercase() ?: productId.uppercase()
+    }
+
+    val specPills = remember(productId, savedProduct, productBrand, productCategory) {
+        val currentSaved = savedProduct
+        if (currentSaved != null) {
+            listOfNotNull(
+                productBrand.takeIf { it != "Product" },
+                productCategory,
+                "${currentSaved.listings.size} stores"
             )
-        )
+        } else {
+            when (productId) {
+                "sony-wh1000xm5" -> listOf("ANC", "30hr Battery", "Bluetooth 5.2")
+                "apple-watch-ultra-2" -> listOf("49mm", "Titanium", "Cellular")
+                "nike-air-jordan-1" -> listOf("US 10", "Leather", "Low Cut")
+                "keychron-k2-v2" -> listOf("Gateron Brown", "Wireless", "75% Layout")
+                else -> listOf("1TB", "NVMe 1.4", "PCIe 4.0", "M.2 2280", "5000 MB/s")
+            }
+        }
+    }
+
+    val canonicalSpecs = remember(productId, savedProduct, productTitle, productBrand, productCategory) {
+        val currentSaved = savedProduct
+        if (currentSaved != null) {
+            listOf(
+                "Product" to productTitle,
+                "Brand" to productBrand,
+                "Category" to productCategory,
+                "Captured From" to (currentSaved.product.originalSource ?: "Visual Cart"),
+                "Tracked Stores" to "${currentSaved.listings.size} merchants"
+            )
+        } else {
+            listOf(
+                "Capacity" to "1 TB",
+                "Interface" to "PCIe Gen 4.0 x4, NVMe 1.4",
+                "Form Factor" to "M.2 2280",
+                "Seq. Read Speed" to "Up to 5,000 MB/s",
+                "Seq. Write Speed" to "Up to 4,200 MB/s",
+                "NAND Technology" to "Micron 176-layer 3D NAND",
+                "Endurance" to "220 TBW",
+                "Warranty" to "5-Year Manufacturer Warranty",
+                "Model / Part No." to "CT1000P3PSSD8"
+            )
+        }
+    }
+
+    val merchantListings = remember(productId, savedProduct) {
+        val currentSaved = savedProduct
+        if (currentSaved != null && currentSaved.listings.isNotEmpty()) {
+            val minPrice = currentSaved.listings.minOf { it.price }
+            currentSaved.listings.map { entity ->
+                MerchantDetailListing(
+                    name = entity.merchant,
+                    price = entity.price,
+                    originalPrice = null,
+                    status = entity.availability.replace('_', ' '),
+                    delivery = entity.deliveryEstimate ?: "See merchant site",
+                    matchType = runCatching { MatchType.valueOf(entity.matchType) }.getOrDefault(MatchType.EXACT),
+                    confidence = entity.confidence,
+                    isLowest = entity.price == minPrice,
+                    url = entity.productUrl
+                )
+            }
+        } else {
+            listOf(
+                MerchantDetailListing(
+                    name = "Flipkart",
+                    price = 5499.0,
+                    originalPrice = 6099.0,
+                    status = "In Stock",
+                    delivery = "Tomorrow, by 2 PM",
+                    matchType = MatchType.LIKELY,
+                    confidence = 0.92f,
+                    isLowest = true,
+                    url = "https://www.flipkart.com"
+                ),
+                MerchantDetailListing(
+                    name = "Croma",
+                    price = 5799.0,
+                    originalPrice = 6199.0,
+                    status = "In Stock",
+                    delivery = "Thursday, Feb 12",
+                    matchType = MatchType.EXACT,
+                    confidence = 0.95f,
+                    isLowest = false,
+                    url = "https://www.croma.com"
+                ),
+                MerchantDetailListing(
+                    name = "Amazon India",
+                    price = 5999.0,
+                    originalPrice = 6499.0,
+                    status = "In Stock",
+                    delivery = "Prime One-Day",
+                    matchType = MatchType.EXACT,
+                    confidence = 0.98f,
+                    isLowest = false,
+                    url = "https://www.amazon.in"
+                ),
+                MerchantDetailListing(
+                    name = "Reliance Digital",
+                    price = 6199.0,
+                    originalPrice = 6599.0,
+                    status = "Only 2 left",
+                    delivery = "Friday, Feb 13",
+                    matchType = MatchType.SIMILAR,
+                    confidence = 0.82f,
+                    isLowest = false,
+                    url = "https://www.reliancedigital.in"
+                )
+            )
+        }
+    }
+
+    val bestDeal = remember(merchantListings) {
+        merchantListings.minByOrNull { it.price } ?: merchantListings.first()
+    }
+    val highestObservedPrice = remember(merchantListings) {
+        merchantListings.maxOfOrNull { it.originalPrice ?: it.price } ?: bestDeal.price
     }
 
     Surface(
@@ -202,7 +306,10 @@ fun ProductDetailScreen(
                         onClick = {
                             val shareIntent = Intent().apply {
                                 action = Intent.ACTION_SEND
-                                putExtra(Intent.EXTRA_TEXT, "Comparing Crucial P3 Plus 1TB SSD on Visual Cart - best price ₹5,499 on Flipkart!")
+                                putExtra(
+                                    Intent.EXTRA_TEXT,
+                                    "Comparing $productTitle on Visual Cart - best price ₹${bestDeal.price.toInt()} on ${bestDeal.name}!"
+                                )
                                 type = "text/plain"
                             }
                             context.startActivity(Intent.createChooser(shareIntent, "Share Comparison"))
@@ -227,7 +334,7 @@ fun ProductDetailScreen(
             // Canonical Title & Brand Header
             Column(modifier = Modifier.padding(horizontal = 20.dp)) {
                 Text(
-                    text = "CRUCIAL · INTERNAL SSD",
+                    text = "${productBrand.uppercase()} · ${productCategory.uppercase()}",
                     style = VisualCartTypography.labelSmall.copy(
                         color = MutedSlate,
                         letterSpacing = 1.sp,
@@ -236,7 +343,7 @@ fun ProductDetailScreen(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Crucial P3 Plus 1TB PCIe 4.0 3D NAND NVMe M.2 SSD",
+                    text = productTitle,
                     style = VisualCartTypography.headlineMedium.copy(
                         fontWeight = FontWeight.Bold,
                         color = DeepInk,
@@ -250,11 +357,9 @@ fun ProductDetailScreen(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.horizontalScroll(rememberScrollState())
                 ) {
-                    SpecTag(spec = "1TB")
-                    SpecTag(spec = "NVMe 1.4")
-                    SpecTag(spec = "PCIe 4.0")
-                    SpecTag(spec = "M.2 2280")
-                    SpecTag(spec = "5000 MB/s")
+                    specPills.forEach { pill ->
+                        SpecTag(spec = pill)
+                    }
                 }
             }
 
@@ -289,7 +394,7 @@ fun ProductDetailScreen(
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text(
-                                    text = "CANONICAL PRODUCT MODEL: CT1000P3PSSD8",
+                                    text = "CANONICAL PRODUCT ID: $canonicalModelLabel",
                                     style = VisualCartTypography.labelSmall.copy(
                                         color = MutedSlate,
                                         fontSize = 9.sp,
@@ -302,6 +407,10 @@ fun ProductDetailScreen(
                         Spacer(modifier = Modifier.height(14.dp))
 
                         // Best Price Banner
+                        val bestOriginal = bestDeal.originalPrice
+                        val bannerSavings = if (bestOriginal != null && bestOriginal > bestDeal.price) {
+                            bestOriginal - bestDeal.price
+                        } else 0.0
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -309,7 +418,7 @@ fun ProductDetailScreen(
                         ) {
                             Column {
                                 Text(
-                                    text = "VERIFIED BEST PRICE",
+                                    text = if (savedProduct != null) "SELECTED MERCHANT PRICE" else "VERIFIED BEST PRICE",
                                     style = VisualCartTypography.labelSmall.copy(
                                         color = ForestGreen,
                                         fontWeight = FontWeight.Bold,
@@ -318,36 +427,41 @@ fun ProductDetailScreen(
                                 )
                                 Row(verticalAlignment = Alignment.Bottom) {
                                     Text(
-                                        text = "₹5,499",
+                                        text = "₹${bestDeal.price.toInt()}",
                                         style = VisualCartTypography.displayMedium.copy(
                                             fontWeight = FontWeight.Bold,
                                             color = DeepInk
                                         )
                                     )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "₹6,099",
-                                        style = VisualCartTypography.bodyMedium.copy(
-                                            textDecoration = TextDecoration.LineThrough,
-                                            color = MutedSlate
+                                    if (bestOriginal != null && bestOriginal > bestDeal.price) {
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "₹${bestOriginal.toInt()}",
+                                            style = VisualCartTypography.bodyMedium.copy(
+                                                textDecoration = TextDecoration.LineThrough,
+                                                color = MutedSlate
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             }
 
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = TerracottaLight,
-                                border = androidx.compose.foundation.BorderStroke(1.dp, Terracotta.copy(alpha = 0.3f))
-                            ) {
-                                Text(
-                                    text = "Save ₹600 (10%)",
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                    style = VisualCartTypography.labelMedium.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = Terracotta
+                            if (bannerSavings > 0) {
+                                val pct = ((bannerSavings / (bestOriginal ?: bestDeal.price)) * 100).toInt()
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = TerracottaLight,
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, Terracotta.copy(alpha = 0.3f))
+                                ) {
+                                    Text(
+                                        text = "Save ₹${bannerSavings.toInt()} ($pct%)",
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        style = VisualCartTypography.labelMedium.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = Terracotta
+                                        )
                                     )
-                                )
+                                }
                             }
                         }
 
@@ -355,22 +469,22 @@ fun ProductDetailScreen(
 
                         // PayPal 1-Click Sandbox Checkout Button
                         VisualCartButton(
-                            text = "Checkout with PayPal · ₹5,499",
+                            text = "Checkout with PayPal · ₹${bestDeal.price.toInt()}",
                             onClick = {
                                 val listing = MerchantListing(
-                                    id = "flipkart_crucial_p3_1tb",
-                                    merchantName = "Flipkart",
-                                    merchantDomain = "flipkart.com",
-                                    title = "Crucial P3 Plus 1TB PCIe 4.0 3D NAND NVMe M.2 SSD",
-                                    price = 5499.0,
-                                    originalPrice = 6099.0,
+                                    id = "${bestDeal.name.lowercase().replace("\\s+".toRegex(), "_")}_$productId",
+                                    merchantName = bestDeal.name,
+                                    merchantDomain = Uri.parse(bestDeal.url).host ?: "store.example.com",
+                                    title = productTitle,
+                                    price = bestDeal.price,
+                                    originalPrice = bestDeal.originalPrice,
                                     currency = "INR",
-                                    productUrl = "https://www.flipkart.com",
+                                    productUrl = bestDeal.url,
                                     imageUrl = "",
-                                    matchType = MatchType.EXACT,
-                                    confidence = 0.96f,
+                                    matchType = bestDeal.matchType,
+                                    confidence = bestDeal.confidence,
                                     availability = AvailabilityStatus.IN_STOCK,
-                                    sourceType = SourceType.DEMO,
+                                    sourceType = if (savedProduct != null) SourceType.DEMO else SourceType.DEMO,
                                     lastVerifiedAt = System.currentTimeMillis()
                                 )
                                 PayPalCheckoutCoordinator.instance.startCheckout(context, listing)
@@ -391,7 +505,7 @@ fun ProductDetailScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Covered by PayPal Buyer Protection · Fast fulfillment via Flipkart",
+                                text = "Covered by PayPal Buyer Protection · Merchant: ${bestDeal.name}",
                                 style = VisualCartTypography.bodySmall.copy(
                                     fontSize = 11.sp,
                                     color = MutedSlate
@@ -551,7 +665,7 @@ fun ProductDetailScreen(
                                     )
                                 )
                                 Text(
-                                    text = "₹5,499 (Today)",
+                                    text = "₹${bestDeal.price.toInt()} (Today)",
                                     style = VisualCartTypography.titleMedium.copy(
                                         fontWeight = FontWeight.Bold,
                                         color = DeepInk
@@ -568,7 +682,7 @@ fun ProductDetailScreen(
                                     )
                                 )
                                 Text(
-                                    text = "₹6,499",
+                                    text = "₹${highestObservedPrice.toInt()}",
                                     style = VisualCartTypography.titleMedium.copy(
                                         fontWeight = FontWeight.Medium,
                                         color = MutedSlate

@@ -576,11 +576,11 @@ object DemoMerchantFixtures {
         query: String,
         searchUrl: String
     ): MerchantListing {
-        val hash = abs(query.hashCode() xor merchantId.hashCode())
-        val basePrice = 1499.0 + (hash % 18500)
-        // Variance across merchants: Amazon +/- 5%, Flipkart -3%, etc.
+        val hash = abs(query.hashCode())
+        val basePrice = 1499.0 + (hash % 3500)
+        // Small realistic variance across merchants derived strictly from the shared query hash
         val multiplier = when (merchantId) {
-            "flipkart" -> 0.95
+            "flipkart" -> 0.96
             "croma" -> 0.98
             "amazon_in" -> 1.00
             "tatacliq" -> 1.02

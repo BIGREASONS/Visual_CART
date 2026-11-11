@@ -20,6 +20,7 @@ import androidx.lifecycle.lifecycleScope
 import com.paypal.visualcart.core.capture.CaptureEventBus
 import com.paypal.visualcart.core.capture.CaptureIntentEvent
 import com.paypal.visualcart.core.designsystem.VisualCartTheme
+import com.paypal.visualcart.core.util.SafeImageDecoder
 import com.paypal.visualcart.core.util.SecurityUtils
 import com.paypal.visualcart.core.util.SharingShortcutsManager
 import com.paypal.visualcart.domain.model.MerchantListing
@@ -41,7 +42,7 @@ import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
-    private val demoAiProvider = CloudProductUnderstandingProvider()
+    private val demoAiProvider = CloudProductUnderstandingProvider.forBackend()
     private val merchantDiscoveryEngine = MerchantDiscoveryEngine()
     private val urlExtractor = ProductUrlExtractor()
 
@@ -205,14 +206,26 @@ class MainActivity : ComponentActivity() {
 
     private fun processSharedImage(imageUri: Uri) {
         lifecycleScope.launch(Dispatchers.IO) {
-            // Visual product extraction: query demo fixtures or local recognition
-            val recognized = demoAiProvider.recognizeFromImage(imageUri.toString())
-            val listings = merchantDiscoveryEngine.searchAll(recognized.title, recognized.specifications)
+            val cachedFile = SafeImageDecoder.copyUriToPrivateCache(this@MainActivity, imageUri)
+            val resolvedUri = cachedFile?.absolutePath ?: imageUri.toString()
+
+            // Visual product extraction: query backend multimodal proxy, demo fixtures, or local parser
+            val recognized = demoAiProvider.recognizeFromImage(resolvedUri)
+            val isUnidentified = recognized.title.equals("Unidentified Product", ignoreCase = true) ||
+                recognized.category.equals("Unidentified", ignoreCase = true) ||
+                DemoProductRecognitionProvider.isGenericCaptureText(recognized.title)
+
+            val listings = if (isUnidentified) {
+                emptyList()
+            } else {
+                merchantDiscoveryEngine.searchAll(recognized.title, recognized.specifications)
+                    .distinctBy { it.id }
+            }
             val minPrice = listings.minOfOrNull { it.price }
 
             val matchResult = DetectedProductMatchResult(
-                detectedTitle = recognized.title,
-                brand = recognized.brand ?: "Detected Product",
+                detectedTitle = if (isUnidentified) "Unidentified Image (Enter Search Manually)" else recognized.title,
+                brand = recognized.brand ?: if (isUnidentified) "Needs Query" else "Detected Product",
                 category = recognized.category,
                 specs = recognized.specifications.entries.map { "${it.key}: ${it.value}" },
                 matchReason = recognized.matchReason,
@@ -252,6 +265,7 @@ class MainActivity : ComponentActivity() {
 
             val parsedAttrs = demoAiProvider.recognizeFromText(queryTitle)
             val listings = merchantDiscoveryEngine.searchAll(parsedAttrs.title, parsedAttrs.specifications)
+                .distinctBy { it.id }
             val minPrice = listings.minOfOrNull { it.price }
 
             val matchResult = DetectedProductMatchResult(

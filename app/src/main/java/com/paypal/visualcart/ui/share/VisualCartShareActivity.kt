@@ -37,10 +37,13 @@ import java.util.UUID
 
 class VisualCartShareActivity : ComponentActivity() {
 
-    private val recognitionProvider = CloudProductUnderstandingProvider()
+    private val recognitionProvider = CloudProductUnderstandingProvider.forBackend()
     private val merchantEngine = MerchantDiscoveryEngine()
     private val urlExtractor = ProductUrlExtractor()
     private lateinit var cartRepository: CartRepositoryImpl
+
+    private var lastCapturedImageUri: String? = null
+    private var lastCapturedThumbnail: Bitmap? = null
 
     private var uiState by mutableStateOf<ShareCaptureUiState>(
         ShareCaptureUiState.Loading(statusMessage = "Receiving shared product…")
@@ -69,6 +72,20 @@ class VisualCartShareActivity : ComponentActivity() {
                     },
                     onViewInStore = { url ->
                         openUrlInBrowser(url)
+                    },
+                    onSubmitManualQuery = { query ->
+                        handleManualProductQuery(query)
+                    },
+                    onEditQuery = {
+                        val current = uiState
+                        val currentTitle = if (current is ShareCaptureUiState.Matched) current.product.title else ""
+                        val thumb = (current as? ShareCaptureUiState.Matched)?.thumbnail ?: lastCapturedThumbnail
+                        uiState = ShareCaptureUiState.NeedsQuery(
+                            thumbnail = thumb,
+                            message = "Enter or refine the product name to search live merchant stores.",
+                            suggestedQuery = currentTitle,
+                            imageUri = lastCapturedImageUri
+                        )
                     },
                     onOpenFullCart = {
                         val intent = Intent(this@VisualCartShareActivity, MainActivity::class.java).apply {
@@ -155,9 +172,10 @@ class VisualCartShareActivity : ComponentActivity() {
     }
 
     private fun handleSharedImage(uri: Uri, contextText: String?) {
+        val cleanHint = contextText?.takeIf { !DemoProductRecognitionProvider.isGenericCaptureText(it) }
         uiState = ShareCaptureUiState.Loading(
             statusMessage = "Analyzing visual features…",
-            detectedHint = contextText?.take(60)
+            detectedHint = cleanHint?.take(60)
         )
 
         lifecycleScope.launch(Dispatchers.IO) {
@@ -166,21 +184,41 @@ class VisualCartShareActivity : ComponentActivity() {
             val thumbnail: Bitmap? = if (privateFile != null) {
                 SafeImageDecoder.decodeThumbnail(privateFile, maxDimension = 720)
             } else null
+            val resolvedUri = privateFile?.absolutePath ?: uri.toString()
+            lastCapturedImageUri = resolvedUri
+            lastCapturedThumbnail = thumbnail
 
             withContext(Dispatchers.Main) {
                 uiState = ShareCaptureUiState.Loading(
                     thumbnail = thumbnail,
                     statusMessage = "Identifying product & stores…",
-                    detectedHint = contextText
+                    detectedHint = cleanHint
                 )
             }
 
-            // 2. Query product understanding provider
-            val queryText = contextText ?: uri.lastPathSegment ?: "Shared Product"
+            // 2. Query product understanding provider without feeding raw filenames as product titles
             val recognized = recognitionProvider.recognizeFromImage(
-                imageUri = privateFile?.absolutePath ?: uri.toString(),
-                contextText = queryText
+                imageUri = resolvedUri,
+                contextText = cleanHint
             )
+
+            val isUnidentified = recognized.title.equals("Unidentified Product", ignoreCase = true) ||
+                recognized.category.equals("Unidentified", ignoreCase = true) ||
+                DemoProductRecognitionProvider.isGenericCaptureText(recognized.title)
+
+            if (isUnidentified) {
+                withContext(Dispatchers.Main) {
+                    uiState = ShareCaptureUiState.NeedsQuery(
+                        thumbnail = thumbnail,
+                        message = recognized.matchReason.ifBlank {
+                            "Could not auto-identify this image. Enter the product name below (or configure GEMINI_API_KEY in backend .env)."
+                        },
+                        suggestedQuery = cleanHint.orEmpty(),
+                        imageUri = resolvedUri
+                    )
+                }
+                return@launch
+            }
 
             // 3. Search multi-merchant discovery engine
             val listings = merchantEngine.searchAll(
@@ -188,10 +226,7 @@ class VisualCartShareActivity : ComponentActivity() {
                 targetSpecs = recognized.specifications
             )
 
-            val exactListings = listings.filter { it.matchType == MatchType.EXACT }
-                .ifEmpty { listings.take(3) }
-            val similarListings = listings.filter { it.matchType != MatchType.EXACT }
-            val bestListing = listings.minByOrNull { it.price } ?: listings.firstOrNull()
+            val (bestListing, exactListings, similarListings) = partitionListings(listings)
 
             withContext(Dispatchers.Main) {
                 if (bestListing != null) {
@@ -210,9 +245,59 @@ class VisualCartShareActivity : ComponentActivity() {
         }
     }
 
+    private fun handleManualProductQuery(rawQuery: String) {
+        val cleanQuery = SecurityUtils.sanitizeSearchQuery(rawQuery).trim()
+        if (cleanQuery.isBlank() || DemoProductRecognitionProvider.isGenericCaptureText(cleanQuery)) {
+            uiState = ShareCaptureUiState.NeedsQuery(
+                thumbnail = lastCapturedThumbnail,
+                message = "Please enter a specific product name (for example: PVC Plastic Pipes, Sony headphones, Nike shoes).",
+                suggestedQuery = "",
+                imageUri = lastCapturedImageUri
+            )
+            return
+        }
+
+        uiState = ShareCaptureUiState.Loading(
+            thumbnail = lastCapturedThumbnail,
+            statusMessage = "Searching stores for \"$cleanQuery\"…",
+            detectedHint = cleanQuery.take(60)
+        )
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val baseRecognized = recognitionProvider.recognizeFromText(cleanQuery)
+            val recognized = baseRecognized.copy(
+                title = baseRecognized.title.ifBlank { cleanQuery },
+                imageUrl = lastCapturedImageUri ?: baseRecognized.imageUrl
+            )
+            val listings = merchantEngine.searchAll(
+                query = recognized.title,
+                targetSpecs = recognized.specifications
+            )
+            val (bestListing, exactListings, similarListings) = partitionListings(listings)
+
+            withContext(Dispatchers.Main) {
+                if (bestListing != null) {
+                    uiState = ShareCaptureUiState.Matched(
+                        product = recognized,
+                        thumbnail = lastCapturedThumbnail,
+                        bestListing = bestListing,
+                        exactListings = exactListings,
+                        similarListings = similarListings,
+                        selectedListing = bestListing
+                    )
+                } else {
+                    uiState = ShareCaptureUiState.Error("No matching store listings found for $cleanQuery")
+                }
+            }
+        }
+    }
+
     private fun handleSharedText(rawText: String) {
         val sanitized = SecurityUtils.sanitizeSearchQuery(rawText)
         val extractedUrl = SecurityUtils.extractWebUrl(rawText)
+
+        lastCapturedImageUri = null
+        lastCapturedThumbnail = null
 
         uiState = ShareCaptureUiState.Loading(
             statusMessage = "Analyzing product link…",
@@ -227,7 +312,18 @@ class VisualCartShareActivity : ComponentActivity() {
                 sanitized
             }
 
-            val parsedAttrs = LocalProductParser.parse(queryTitle)
+            if (DemoProductRecognitionProvider.isGenericCaptureText(queryTitle)) {
+                withContext(Dispatchers.Main) {
+                    uiState = ShareCaptureUiState.NeedsQuery(
+                        thumbnail = null,
+                        message = "Could not extract a product name from the shared link. Enter the product name below.",
+                        suggestedQuery = "",
+                        imageUri = null
+                    )
+                }
+                return@launch
+            }
+
             val recognized = recognitionProvider.recognizeFromText(queryTitle)
 
             val listings = merchantEngine.searchAll(
@@ -235,10 +331,7 @@ class VisualCartShareActivity : ComponentActivity() {
                 targetSpecs = recognized.specifications
             )
 
-            val exactListings = listings.filter { it.matchType == MatchType.EXACT }
-                .ifEmpty { listings.take(3) }
-            val similarListings = listings.filter { it.matchType != MatchType.EXACT }
-            val bestListing = listings.minByOrNull { it.price } ?: listings.firstOrNull()
+            val (bestListing, exactListings, similarListings) = partitionListings(listings)
 
             withContext(Dispatchers.Main) {
                 if (bestListing != null) {
@@ -257,11 +350,24 @@ class VisualCartShareActivity : ComponentActivity() {
         }
     }
 
+    private fun partitionListings(
+        listings: List<MerchantListing>
+    ): Triple<MerchantListing?, List<MerchantListing>, List<MerchantListing>> {
+        val unique = listings.distinctBy { it.id }
+        val exact = unique.filter { it.matchType == MatchType.EXACT }
+            .ifEmpty { unique.take(3) }
+        val exactIds = exact.mapTo(mutableSetOf()) { it.id }
+        val similar = unique.filterNot { it.id in exactIds }
+        val best = unique.minByOrNull { it.price } ?: unique.firstOrNull()
+        return Triple(best, exact, similar)
+    }
+
     private fun saveListingToCart(selectedListing: MerchantListing) {
         val current = uiState as? ShareCaptureUiState.Matched ?: return
 
         lifecycleScope.launch(Dispatchers.IO) {
-            val listingEntities = (current.exactListings + current.similarListings).map { listing ->
+            val allListings = (current.exactListings + current.similarListings).distinctBy { it.id }
+            val listingEntities = allListings.map { listing ->
                 MerchantListingEntity(
                     savedProductId = "",
                     merchant = listing.merchantName,
@@ -276,7 +382,7 @@ class VisualCartShareActivity : ComponentActivity() {
                     sourceType = listing.sourceType.name,
                     lastVerifiedAt = System.currentTimeMillis(),
                     deliveryEstimate = listing.deliveryEstimate,
-                    isSelectedForPurchase = listing == selectedListing
+                    isSelectedForPurchase = listing.id == selectedListing.id
                 )
             }
 

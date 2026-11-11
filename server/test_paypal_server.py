@@ -831,4 +831,39 @@ def test_debug_id_logging_no_secrets_in_server(caplog):
         assert "client_secret" not in log_text
 
 
+def test_ai_recognize_product_rejects_generic_image_without_gemini_key(monkeypatch):
+    """When GEMINI_API_KEY is missing and an image is sent with no meaningful product hint,
+    backend must NOT hallucinate a Samsung SSD or search query from 'shared image.jpg'."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    res = client.post(
+        "/api/v1/ai/recognize-product",
+        json={
+            "image_base64": "AQIDBA==",
+            "mime_type": "image/jpeg",
+            "hint_text": "shared image.jpg",
+            "context_text": "shared image.jpg",
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["source"] == "needs_gemini_key"
+    assert data["title"] == "Unidentified Product"
+    assert data["category"] == "Unidentified"
+    assert data["confidence"] <= 0.2
+    assert data["estimated_price"] is None
+
+
+def test_health_endpoint_reports_gemini_key_flag(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    res_missing = client.get("/health")
+    assert res_missing.status_code == 200
+    assert res_missing.json()["has_gemini_api_key"] is False
+
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-gemini-key")
+    res_present = client.get("/health")
+    assert res_present.status_code == 200
+    assert res_present.json()["has_gemini_api_key"] is True
+
+
+
 
