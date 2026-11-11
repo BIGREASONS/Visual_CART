@@ -4,8 +4,10 @@ import android.content.Context
 import android.util.Log
 import com.paypal.visualcart.domain.model.MerchantListing
 import java.util.Collections
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.max
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -44,21 +46,13 @@ sealed class PayPalCheckoutUiState {
         val originalListing: MerchantListing? = null
     ) : PayPalCheckoutUiState() {
         val formattedSubtotal: String
-            get() = formatCurrency(subtotal, currency)
+            get() = PayPalCheckoutCoordinator.formatAmount(subtotal, currency)
         val formattedTax: String
-            get() = formatCurrency(applicableTax, currency)
+            get() = PayPalCheckoutCoordinator.formatAmount(applicableTax, currency)
         val formattedShipping: String
-            get() = if (shippingFee == 0.0) "FREE" else formatCurrency(shippingFee, currency)
+            get() = if (shippingFee == 0.0) "FREE" else PayPalCheckoutCoordinator.formatAmount(shippingFee, currency)
         val formattedTotal: String
-            get() = formatCurrency(finalTotal, currency)
-
-        private fun formatCurrency(amount: Double, cur: String): String {
-            return if (cur.equals("INR", ignoreCase = true)) {
-                "₹%,.2f".format(amount)
-            } else {
-                "$cur %,.2f".format(amount)
-            }
-        }
+            get() = PayPalCheckoutCoordinator.formatAmount(finalTotal, currency)
     }
 
     data class Verifying(
@@ -79,11 +73,7 @@ sealed class PayPalCheckoutUiState {
         val timestamp: Long = System.currentTimeMillis()
     ) : PayPalCheckoutUiState() {
         val formattedAmount: String
-            get() = if (currency.equals("INR", ignoreCase = true)) {
-                "₹%,.2f".format(verifiedAmount)
-            } else {
-                "$currency %,.2f".format(verifiedAmount)
-            }
+            get() = PayPalCheckoutCoordinator.formatAmount(verifiedAmount, currency)
     }
 
     data class Failure(
@@ -128,7 +118,16 @@ class PayPalCheckoutCoordinator(
 
     companion object {
         private const val TAG = "PayPalCheckout"
+        const val DEFAULT_INR_TO_USD_RATE = 0.012
         val instance: PayPalCheckoutCoordinator by lazy { PayPalCheckoutCoordinator() }
+
+        fun formatAmount(amount: Double, currency: String): String {
+            return when {
+                currency.equals("INR", ignoreCase = true) -> "₹%,.2f".format(Locale.US, amount)
+                currency.equals("USD", ignoreCase = true) -> "$%,.2f".format(Locale.US, amount)
+                else -> "${currency.uppercase(Locale.US)} %,.2f".format(Locale.US, amount)
+            }
+        }
 
         private fun logI(tag: String, msg: String) {
             try { Log.i(tag, msg) } catch (_: Throwable) { }
@@ -152,6 +151,7 @@ class PayPalCheckoutCoordinator(
      */
     fun startCheckout(context: Any? = null, listing: MerchantListing) {
         activeListing = listing
+        lastOrderReadyState = null
         _uiState.value = PayPalCheckoutUiState.Initializing(
             productTitle = listing.title,
             merchantName = listing.merchantName
@@ -160,17 +160,26 @@ class PayPalCheckoutCoordinator(
         scope.launch(workDispatcher) {
             try {
                 val isAvailable = backendClient.isBackendAvailable()
-                var orderResult: CreateOrderServerResult? = null
-
-                if (isAvailable) {
-                    orderResult = backendClient.createOrder(
+                val orderReady = if (isAvailable) {
+                    val orderResult = backendClient.createOrder(
                         listing = listing,
                         returnUrl = PayPalDeepLinkHandler.RETURN_URL_PREFIX,
                         cancelUrl = PayPalDeepLinkHandler.CANCEL_URL_PREFIX
                     )
-                }
+                    if (orderResult == null) {
+                        // Never silently downgrade a live backend rejection/error into simulated SBX-ORD-
+                        val rawError = backendClient.lastErrorMessage
+                            ?: "Backend failed to create a live PayPal Sandbox order."
+                        val issueCode = parseIssueCode(rawError)
+                        _uiState.value = PayPalCheckoutUiState.Failure(
+                            errorMessage = formatCreateOrderError(rawError, issueCode, listing),
+                            errorCode = issueCode,
+                            canRetry = true,
+                            originalListing = listing
+                        )
+                        return@launch
+                    }
 
-                val orderReady = if (orderResult != null) {
                     val summary = orderResult.orderSummary
                     val subtotal = summary?.subtotal ?: listing.price
                     val tax = summary?.gst ?: (subtotal * 0.18)
@@ -192,7 +201,7 @@ class PayPalCheckoutCoordinator(
                         originalListing = listing
                     )
                 } else {
-                    // Offline sandbox simulation breakdown
+                    // Offline sandbox simulation breakdown when backend server is unreachable
                     val summary = paymentAdapter.generateOrderSummary(listing)
                     val simOrderId = "SBX-ORD-" + UUID.randomUUID().toString().replace("-", "").take(10).uppercase()
                     val approvalUrl = paymentAdapter.buildSandboxApprovalUrl(simOrderId)
@@ -223,6 +232,50 @@ class PayPalCheckoutCoordinator(
                     originalListing = listing
                 )
             }
+        }
+    }
+
+    /**
+     * Explicitly converts a listing into USD settlement currency after user confirmation.
+     * Never called silently on INR rejection.
+     */
+    fun checkoutInUsdExplicitly(
+        context: Any? = null,
+        listing: MerchantListing,
+        usdRate: Double = DEFAULT_INR_TO_USD_RATE
+    ) {
+        val convertedPrice = if (listing.currency.equals("USD", ignoreCase = true)) {
+            listing.price
+        } else {
+            max(0.01, Math.round(listing.price * usdRate * 100.0) / 100.0)
+        }
+        val convertedOriginal = listing.originalPrice?.let {
+            if (listing.currency.equals("USD", ignoreCase = true)) it
+            else max(0.01, Math.round(it * usdRate * 100.0) / 100.0)
+        }
+        val usdListing = listing.copy(
+            price = convertedPrice,
+            originalPrice = convertedOriginal,
+            currency = "USD"
+        )
+        startCheckout(context, usdListing)
+    }
+
+    private fun parseIssueCode(rawError: String): String? {
+        return when {
+            rawError.contains("CURRENCY_NOT_SUPPORTED", ignoreCase = true) -> "CURRENCY_NOT_SUPPORTED"
+            rawError.contains("DUPLICATE_INVOICE_ID", ignoreCase = true) -> "DUPLICATE_INVOICE_ID"
+            rawError.contains("INSTRUMENT_DECLINED", ignoreCase = true) -> "INSTRUMENT_DECLINED"
+            else -> Regex("""\[([A-Z0-9_]{3,})\]""").find(rawError)?.groupValues?.get(1)
+        }
+    }
+
+    private fun formatCreateOrderError(rawError: String, issueCode: String?, listing: MerchantListing): String {
+        return if (issueCode == "CURRENCY_NOT_SUPPORTED") {
+            "$rawError — PayPal Sandbox does not support ${listing.currency} for this account. " +
+                "Tap \"Checkout in USD\" below to convert explicitly and pay in USD."
+        } else {
+            rawError
         }
     }
 

@@ -349,4 +349,132 @@ class PayPalCheckoutCoordinatorTest {
         val currentState = coordinator.uiState.value
         assertEquals(originalState, currentState)
     }
+
+    @Test
+    fun testStartCheckout_BackendAvailableButCreateOrderFails_TransitionsToFailureNeverFakeOrder() = runTest(testDispatcher) {
+        val rejectingBackendClient = object : PayPalBackendClient() {
+            override fun isBackendAvailable(): Boolean = true
+
+            override fun createOrder(
+                listing: MerchantListing,
+                returnUrl: String,
+                cancelUrl: String,
+                quantity: Int,
+                taxRate: Double,
+                deliveryFee: Double
+            ): CreateOrderServerResult? {
+                lastErrorMessage = "PayPal error [CURRENCY_NOT_SUPPORTED] (debug_id: ca58a035ea87f): Currency INR is not supported."
+                return null
+            }
+        }
+
+        val adapter = PayPalSandboxPaymentAdapter(backendClient = rejectingBackendClient)
+        val coordinator = PayPalCheckoutCoordinator(
+            backendClient = rejectingBackendClient,
+            paymentAdapter = adapter,
+            scope = this,
+            ioDispatcher = testDispatcher
+        )
+
+        coordinator.startCheckout(null, sampleListing)
+        advanceUntilIdle()
+
+        val state = coordinator.uiState.value
+        assertTrue("Expected Failure state (must never fall back to SBX-ORD-), got $state", state is PayPalCheckoutUiState.Failure)
+        val failure = state as PayPalCheckoutUiState.Failure
+        assertEquals("CURRENCY_NOT_SUPPORTED", failure.errorCode)
+        assertEquals(sampleListing, failure.originalListing)
+        assertTrue(failure.canRetry)
+        assertTrue(failure.errorMessage.contains("CURRENCY_NOT_SUPPORTED"))
+    }
+
+    @Test
+    fun testCheckoutInUsdExplicitly_ConvertsListingAndCreatesUsdOrder() = runTest(testDispatcher) {
+        var requestedCurrency: String? = null
+        var requestedAmount: Double? = null
+
+        val usdRecordingBackendClient = object : PayPalBackendClient() {
+            override fun isBackendAvailable(): Boolean = true
+
+            override fun createOrder(
+                listing: MerchantListing,
+                returnUrl: String,
+                cancelUrl: String,
+                quantity: Int,
+                taxRate: Double,
+                deliveryFee: Double
+            ): CreateOrderServerResult? {
+                requestedCurrency = listing.currency
+                requestedAmount = listing.price
+                val subtotal = listing.price * quantity
+                val tax = Math.round(subtotal * taxRate * 100.0) / 100.0
+                val total = Math.round((subtotal + tax + deliveryFee) * 100.0) / 100.0
+                val summary = OrderSummary(
+                    listingId = listing.id,
+                    productTitle = listing.title,
+                    merchantName = listing.merchantName,
+                    subtotal = subtotal,
+                    gst = tax,
+                    deliveryFee = deliveryFee,
+                    total = total,
+                    currency = listing.currency
+                )
+                return CreateOrderServerResult(
+                    orderId = "8H298990D2991841W",
+                    status = "CREATED",
+                    approveUrl = "https://www.sandbox.paypal.com/checkoutnow?token=8H298990D2991841W",
+                    currency = listing.currency,
+                    amount = total,
+                    isLiveSandbox = true,
+                    orderSummary = summary
+                )
+            }
+        }
+
+        val adapter = PayPalSandboxPaymentAdapter(backendClient = usdRecordingBackendClient)
+        val coordinator = PayPalCheckoutCoordinator(
+            backendClient = usdRecordingBackendClient,
+            paymentAdapter = adapter,
+            scope = this,
+            ioDispatcher = testDispatcher
+        )
+
+        coordinator.checkoutInUsdExplicitly(null, sampleListing)
+        advanceUntilIdle()
+
+        assertEquals("USD", requestedCurrency)
+        assertEquals(65.99, requestedAmount ?: 0.0, 0.01)
+
+        val state = coordinator.uiState.value
+        assertTrue("Expected OrderReady state, got $state", state is PayPalCheckoutUiState.OrderReady)
+        val ready = state as PayPalCheckoutUiState.OrderReady
+        assertEquals("USD", ready.currency)
+        assertEquals(65.99, ready.subtotal, 0.01)
+        assertEquals("$77.87", ready.formattedTotal)
+        assertTrue(ready.isLiveSandbox)
+    }
+
+    @Test
+    fun testStartCheckout_BackendOffline_UsesSimulatedFallback() = runTest(testDispatcher) {
+        val offlineBackendClient = object : PayPalBackendClient() {
+            override fun isBackendAvailable(): Boolean = false
+        }
+
+        val adapter = PayPalSandboxPaymentAdapter(backendClient = offlineBackendClient)
+        val coordinator = PayPalCheckoutCoordinator(
+            backendClient = offlineBackendClient,
+            paymentAdapter = adapter,
+            scope = this,
+            ioDispatcher = testDispatcher
+        )
+
+        coordinator.startCheckout(null, sampleListing)
+        advanceUntilIdle()
+
+        val state = coordinator.uiState.value
+        assertTrue("Expected simulated OrderReady state when backend offline, got $state", state is PayPalCheckoutUiState.OrderReady)
+        val ready = state as PayPalCheckoutUiState.OrderReady
+        assertFalse(ready.isLiveSandbox)
+        assertTrue(ready.orderId.startsWith("SBX-ORD-"))
+    }
 }

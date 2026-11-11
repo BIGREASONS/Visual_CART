@@ -841,7 +841,10 @@ async def get_paypal_order(order_id: str):
                     },
                 )
                 response.raise_for_status()
-                return response.json()
+                data = response.json()
+                if "currency" not in data and data.get("purchase_units"):
+                    data["currency"] = data["purchase_units"][0].get("amount", {}).get("currency_code")
+                return data
             except httpx.HTTPStatusError as e:
                 raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
             except Exception as e:

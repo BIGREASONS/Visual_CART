@@ -377,7 +377,10 @@ class PayPalClient:
             try:
                 resp = await client.post(f"{self.base_url}/v2/checkout/orders", headers=headers, json=payload)
                 resp.raise_for_status()
-                return resp.json()
+                data = resp.json()
+                data.setdefault("currency", curr)
+                data.setdefault("amount", float(total_str))
+                return data
             except httpx.HTTPStatusError as e:
                 try:
                     error_json = e.response.json()
@@ -416,7 +419,10 @@ class PayPalClient:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{self.base_url}/v2/checkout/orders/{clean_order_id}", headers=headers)
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            if "currency" not in data and data.get("purchase_units"):
+                data["currency"] = data["purchase_units"][0].get("amount", {}).get("currency_code")
+            return data
 
     async def capture_order(
         self,

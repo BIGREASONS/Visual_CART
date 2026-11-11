@@ -18,6 +18,22 @@ from fastapi.testclient import TestClient
 
 client = TestClient(app)
 
+
+@pytest.fixture(autouse=True)
+def isolate_offline_sandbox_tests(monkeypatch):
+    """Keeps offline/mocked backend tests deterministic even when .env contains live Sandbox keys."""
+    for env_key in (
+        "PAYPAL_CLIENT_ID",
+        "PAYPAL_CLIENT_SECRET",
+        "PAYPAL_SANDBOX_CLIENT_ID",
+        "PAYPAL_SANDBOX_CLIENT_SECRET",
+    ):
+        monkeypatch.delenv(env_key, raising=False)
+    monkeypatch.setattr("backend.main.paypal_client.client_id", "")
+    monkeypatch.setattr("backend.main.paypal_client.client_secret", "")
+    monkeypatch.setattr("backend.main.paypal_client._cached_token", None)
+    monkeypatch.setattr("backend.main.paypal_client._token_expires_at", 0.0)
+
 class TestZeroHardcodedSecrets:
     def test_paypal_client_defaults_empty_secrets(self, monkeypatch):
         monkeypatch.delenv("PAYPAL_CLIENT_ID", raising=False)

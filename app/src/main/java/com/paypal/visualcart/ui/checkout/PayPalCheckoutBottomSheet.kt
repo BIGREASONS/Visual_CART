@@ -155,9 +155,17 @@ fun PayPalCheckoutBottomSheet(
                 }
 
                 is PayPalCheckoutUiState.Failure -> {
+                    val originalListing = state.originalListing
+                    val canConvertToUsd = state.errorCode == "CURRENCY_NOT_SUPPORTED" &&
+                        originalListing?.currency?.equals("INR", ignoreCase = true) == true
                     CheckoutFailureView(
                         state = state,
                         onRetry = { coordinator.retry(context) },
+                        onCheckoutInUsd = if (canConvertToUsd && originalListing != null) {
+                            { coordinator.checkoutInUsdExplicitly(context, originalListing) }
+                        } else {
+                            null
+                        },
                         onCancel = onDismiss
                     )
                 }
@@ -654,6 +662,7 @@ private fun CheckoutSuccessView(
 private fun CheckoutFailureView(
     state: PayPalCheckoutUiState.Failure,
     onRetry: () -> Unit,
+    onCheckoutInUsd: (() -> Unit)? = null,
     onCancel: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -729,11 +738,27 @@ private fun CheckoutFailureView(
 
         Spacer(modifier = Modifier.height(18.dp))
 
+        if (onCheckoutInUsd != null && state.originalListing != null) {
+            val previewUsd = kotlin.math.max(
+                0.01,
+                Math.round(state.originalListing.price * PayPalCheckoutCoordinator.DEFAULT_INR_TO_USD_RATE * 100.0) / 100.0
+            )
+            VisualCartButton(
+                text = "Checkout in USD (~${PayPalCheckoutCoordinator.formatAmount(previewUsd, "USD")} USD)",
+                onClick = onCheckoutInUsd,
+                variant = ButtonVariant.PRIMARY,
+                icon = VisualCartIcons.ShieldCheck,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
         if (state.canRetry) {
             VisualCartButton(
                 text = "Retry Payment",
                 onClick = onRetry,
-                variant = ButtonVariant.PRIMARY,
+                variant = if (onCheckoutInUsd != null) ButtonVariant.SECONDARY else ButtonVariant.PRIMARY,
                 icon = Icons.Default.Refresh,
                 modifier = Modifier.fillMaxWidth()
             )

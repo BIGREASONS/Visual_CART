@@ -27,6 +27,22 @@ from main import (
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def isolate_offline_sandbox_tests(monkeypatch):
+    """Keeps offline/mocked server tests deterministic even when .env contains live Sandbox keys."""
+    for env_key in (
+        "PAYPAL_CLIENT_ID",
+        "PAYPAL_CLIENT_SECRET",
+        "PAYPAL_SANDBOX_CLIENT_ID",
+        "PAYPAL_SANDBOX_CLIENT_SECRET",
+    ):
+        monkeypatch.delenv(env_key, raising=False)
+    monkeypatch.setattr("main.PAYPAL_CLIENT_ID", "")
+    monkeypatch.setattr("main.PAYPAL_CLIENT_SECRET", "")
+    monkeypatch.setattr("main._cached_token", None)
+    monkeypatch.setattr("main._token_expires_at", 0.0)
+
+
 def test_health_check():
     response = client.get("/health")
     assert response.status_code == 200

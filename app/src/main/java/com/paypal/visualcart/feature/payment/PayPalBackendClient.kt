@@ -57,8 +57,8 @@ data class PayPalServerConfig(
  */
 open class PayPalBackendClient(
     private val configuredBaseUrl: String? = null,
-    private val connectTimeoutMs: Int = 3000,
-    private val readTimeoutMs: Int = 4000
+    private val connectTimeoutMs: Int = 8000,
+    private val readTimeoutMs: Int = 15000
 ) {
 
     @Volatile
@@ -66,7 +66,7 @@ open class PayPalBackendClient(
 
     @Volatile
     var lastErrorMessage: String? = null
-        private set
+        protected set
 
     val baseUrl: String
         get() = detectedBaseUrl ?: configuredBaseUrl?.takeIf { it.isNotBlank() } ?: resolveBaseUrl()
@@ -239,13 +239,7 @@ open class PayPalBackendClient(
         val responseText = executePost("$baseUrl/api/v1/payments/paypal/capture-order", payload, headers)
 
         if (responseText == null) {
-            val errorIssue = lastErrorMessage?.let { msg ->
-                when {
-                    "INSTRUMENT_DECLINED" in msg -> "INSTRUMENT_DECLINED"
-                    "DUPLICATE_INVOICE_ID" in msg -> "DUPLICATE_INVOICE_ID"
-                    else -> null
-                }
-            }
+            val errorIssue = extractErrorIssue(lastErrorMessage)
             val errorDebugId = lastErrorMessage?.let { msg ->
                 val match = Regex("""debug_id:\s*([a-zA-Z0-9_-]+)""").find(msg)
                 match?.groupValues?.get(1)
@@ -306,6 +300,7 @@ open class PayPalBackendClient(
     }
 
     private fun executeGet(urlString: String): String? {
+        lastErrorMessage = null
         return try {
             val url = URL(urlString)
             val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -314,18 +309,7 @@ open class PayPalBackendClient(
                 readTimeout = readTimeoutMs
                 setRequestProperty("Accept", "application/json")
             }
-            if (conn.responseCode in 200..299) {
-                BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
-            } else {
-                val errorBody = try {
-                    conn.errorStream?.let { BufferedReader(InputStreamReader(it)).use { r -> r.readText() } }
-                } catch (_: Exception) {
-                    null
-                }
-                lastErrorMessage = errorBody?.let { extractString(it, "detail") ?: extractString(it, "message") }
-                    ?: "HTTP ${conn.responseCode}: ${conn.responseMessage}"
-                null
-            }
+            readResponse(conn)
         } catch (e: Exception) {
             lastErrorMessage = e.message ?: "Network error"
             null
@@ -337,6 +321,7 @@ open class PayPalBackendClient(
         jsonPayload: String,
         headers: Map<String, String> = emptyMap()
     ): String? {
+        lastErrorMessage = null
         return try {
             val url = URL(urlString)
             val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -354,21 +339,52 @@ open class PayPalBackendClient(
                 writer.write(jsonPayload)
                 writer.flush()
             }
-            if (conn.responseCode in 200..299) {
-                BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
-            } else {
-                val errorBody = try {
-                    conn.errorStream?.let { BufferedReader(InputStreamReader(it)).use { r -> r.readText() } }
-                } catch (_: Exception) {
-                    null
-                }
-                lastErrorMessage = errorBody?.let { extractString(it, "detail") ?: extractString(it, "message") }
-                    ?: "HTTP ${conn.responseCode}: ${conn.responseMessage}"
-                null
-            }
+            readResponse(conn)
         } catch (e: Exception) {
             lastErrorMessage = e.message ?: "Network error"
             null
+        }
+    }
+
+    private fun readResponse(conn: HttpURLConnection): String? {
+        return if (conn.responseCode in 200..299) {
+            BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
+        } else {
+            val errorBody = try {
+                conn.errorStream?.let { BufferedReader(InputStreamReader(it)).use { r -> r.readText() } }
+            } catch (_: Exception) {
+                null
+            }
+            lastErrorMessage = parseErrorBody(errorBody, conn.responseCode, conn.responseMessage)
+            null
+        }
+    }
+
+    private fun parseErrorBody(errorBody: String?, responseCode: Int, responseMessage: String?): String {
+        if (errorBody.isNullOrBlank()) {
+            return "HTTP $responseCode: $responseMessage"
+        }
+        val detail = extractString(errorBody, "detail")
+            ?: extractString(errorBody, "message")
+            ?: extractString(errorBody, "error")
+        val issue = extractString(errorBody, "issue") ?: extractErrorIssue(errorBody)
+        return when {
+            detail != null && issue != null && !detail.contains(issue) -> "PayPal error [$issue]: $detail"
+            detail != null -> detail
+            issue != null -> "PayPal error [$issue]: $errorBody"
+            else -> "HTTP $responseCode: $responseMessage"
+        }
+    }
+
+    private fun extractErrorIssue(message: String?): String? {
+        if (message.isNullOrBlank()) return null
+        return when {
+            "CURRENCY_NOT_SUPPORTED" in message -> "CURRENCY_NOT_SUPPORTED"
+            "INSTRUMENT_DECLINED" in message -> "INSTRUMENT_DECLINED"
+            "DUPLICATE_INVOICE_ID" in message -> "DUPLICATE_INVOICE_ID"
+            "ORDER_NOT_APPROVED" in message -> "ORDER_NOT_APPROVED"
+            "PAYER_ACTION_REQUIRED" in message -> "PAYER_ACTION_REQUIRED"
+            else -> Regex("""\[([A-Z0-9_]{3,})\]""").find(message)?.groupValues?.get(1)
         }
     }
 
@@ -383,8 +399,10 @@ open class PayPalBackendClient(
     }
 
     private fun extractString(json: String, key: String): String? {
-        val pattern = "\"$key\"\\s*:\\s*\"([^\"]*)\"".toRegex()
+        val pattern = "\"$key\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"".toRegex()
         return pattern.find(json)?.groupValues?.get(1)
+            ?.replace("\\\"", "\"")
+            ?.replace("\\\\", "\\")
     }
 
     private fun extractDouble(json: String, key: String): Double? {
