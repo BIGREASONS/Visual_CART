@@ -29,18 +29,24 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def isolate_offline_sandbox_tests(monkeypatch):
-    """Keeps offline/mocked server tests deterministic even when .env contains live Sandbox keys."""
+    """Keeps offline/mocked server tests deterministic even when .env contains live Sandbox/Gemini keys."""
     for env_key in (
         "PAYPAL_CLIENT_ID",
         "PAYPAL_CLIENT_SECRET",
         "PAYPAL_SANDBOX_CLIENT_ID",
         "PAYPAL_SANDBOX_CLIENT_SECRET",
+        "GEMINI_API_KEY",
+        "GEMINI_MODEL",
+        "GEMINI_FREE_TIER_ONLY",
+        "AI_MAX_COST_USD",
     ):
         monkeypatch.delenv(env_key, raising=False)
     monkeypatch.setattr("main.PAYPAL_CLIENT_ID", "")
     monkeypatch.setattr("main.PAYPAL_CLIENT_SECRET", "")
     monkeypatch.setattr("main._cached_token", None)
     monkeypatch.setattr("main._token_expires_at", 0.0)
+    monkeypatch.setattr("main._gemini_client_instance", None)
+    monkeypatch.setattr("main._gemini_client_signature", None)
 
 
 def test_health_check():
@@ -880,6 +886,25 @@ def test_merchants_search_rejects_noise_and_has_no_fabricated_prices():
     for item in payload["listings"]:
         assert item["price"] is None
         assert item["listing_origin"] == "DIRECT_SEARCH_URL"
+
+
+def test_health_reports_zero_billing_free_tier_gemini_policy():
+    res = client.get("/health")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["gemini_model"] == "gemini-3.5-flash-lite"
+    assert body["free_tier_only"] is True
+    assert body["ai_max_cost_usd"] == 0.0
+    assert body["paid_fallback_disabled"] is True
+
+
+def test_recognize_product_rejects_paid_model_override():
+    res = client.post(
+        "/api/v1/ai/recognize-product",
+        json={"hint_text": "Logitech mouse", "model": "gemini-2.5-pro"},
+    )
+    assert res.status_code == 400
+    assert "allowlist" in res.json()["detail"].lower()
 
 
 

@@ -28,8 +28,7 @@ import com.paypal.visualcart.domain.model.MerchantComparisonSummary
 import com.paypal.visualcart.domain.model.MerchantListing
 import com.paypal.visualcart.domain.model.RecognitionSource
 import com.paypal.visualcart.domain.model.RecognitionStatus
-import com.paypal.visualcart.feature.ai.CloudProductUnderstandingProvider
-import com.paypal.visualcart.feature.ai.DemoProductRecognitionProvider
+import com.paypal.visualcart.feature.ai.GeminiFreeVisionProvider
 import com.paypal.visualcart.feature.ai.LocalProductParser
 import com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine
 import com.paypal.visualcart.feature.merchant.ProductUrlExtractor
@@ -43,7 +42,7 @@ import java.util.UUID
 
 class VisualCartShareActivity : ComponentActivity() {
 
-    private val recognitionProvider = CloudProductUnderstandingProvider.forBackend()
+    private val recognitionProvider = GeminiFreeVisionProvider.forBackend()
     private val liveMerchantEngine = MerchantDiscoveryEngine(
         MerchantDiscoveryEngine.defaultProviders().onEach { it.isLiveMode = true }
     )
@@ -272,7 +271,8 @@ class VisualCartShareActivity : ComponentActivity() {
                         imageUri = resolvedPath,
                         candidates = recognized.candidates,
                         canRetry = true,
-                        detectedCategory = recognized.category
+                        detectedCategory = recognized.category,
+                        rateLimited = recognized.rateLimited
                     )
                 }
                 return@launch
@@ -325,12 +325,13 @@ class VisualCartShareActivity : ComponentActivity() {
                     }
                     uiState = ShareCaptureUiState.NeedsQuery(
                         thumbnail = thumbnail,
-                        message = reasonMessage,
+                        message = recognized.diagnosticNote?.takeIf { recognized.rateLimited } ?: reasonMessage,
                         suggestedQuery = cleanHint.orEmpty(),
                         imageUri = resolvedPath,
                         candidates = recognized.candidates,
                         canRetry = true,
-                        detectedCategory = recognized.category
+                        detectedCategory = recognized.category,
+                        rateLimited = recognized.rateLimited
                     )
                 }
             }
@@ -359,11 +360,14 @@ class VisualCartShareActivity : ComponentActivity() {
         )
 
         lifecycleScope.launch(Dispatchers.IO) {
-            val baseRecognized = recognitionProvider.recognizeFromText(verifiedQuery)
+            val baseRecognized = LocalProductParser.parse(verifiedQuery, imageUrl = lastCapturedImageUri)
             val recognized = baseRecognized.copy(
                 title = baseRecognized.title.ifBlank { verifiedQuery },
                 searchQuery = verifiedQuery,
-                imageUrl = lastCapturedImageUri ?: baseRecognized.imageUrl
+                imageUrl = lastCapturedImageUri ?: baseRecognized.imageUrl,
+                isDemoFixture = false,
+                isLiveInference = false,
+                recognitionSource = RecognitionSource.MANUAL_SEARCH
             )
             val engine = if (recognized.recognitionSource == RecognitionSource.DEMO && recognized.isDemoFixture) {
                 demoMerchantEngine

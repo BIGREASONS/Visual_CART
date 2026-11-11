@@ -27,7 +27,7 @@ import com.paypal.visualcart.domain.model.MerchantComparisonSummary
 import com.paypal.visualcart.domain.model.MerchantListing
 import com.paypal.visualcart.domain.model.RecognitionSource
 import com.paypal.visualcart.domain.model.RecognitionStatus
-import com.paypal.visualcart.feature.ai.CloudProductUnderstandingProvider
+import com.paypal.visualcart.feature.ai.GeminiFreeVisionProvider
 import com.paypal.visualcart.feature.merchant.MerchantDiscoveryEngine
 import com.paypal.visualcart.feature.merchant.ProductUrlExtractor
 import com.paypal.visualcart.feature.merchant.SearchQueryBuilder
@@ -43,7 +43,7 @@ import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
-    private val demoAiProvider = CloudProductUnderstandingProvider.forBackend()
+    private val aiProvider = GeminiFreeVisionProvider.forBackend()
     private val liveMerchantDiscoveryEngine = MerchantDiscoveryEngine(
         MerchantDiscoveryEngine.defaultProviders().onEach { it.isLiveMode = true }
     )
@@ -243,7 +243,7 @@ class MainActivity : ComponentActivity() {
             )
 
             val resolvedPath = captureResult.file.absolutePath
-            val recognized = demoAiProvider.recognizeFromImage(resolvedPath)
+            val recognized = aiProvider.recognizeFromImage(resolvedPath)
             val engine = if (recognized.recognitionSource == RecognitionSource.DEMO && recognized.isDemoFixture) {
                 demoMerchantDiscoveryEngine
             } else {
@@ -300,7 +300,9 @@ class MainActivity : ComponentActivity() {
                 isUncertain = isUnidentified || recognized.status != RecognitionStatus.IDENTIFIED || recognized.candidates.size > 1,
                 recognitionStatus = recognized.status,
                 candidates = recognized.candidates,
-                searchQuery = canonicalQuery
+                searchQuery = canonicalQuery,
+                recognitionSource = recognized.recognitionSource,
+                rateLimited = recognized.rateLimited
             )
 
             withContext(Dispatchers.Main) {
@@ -342,7 +344,7 @@ class MainActivity : ComponentActivity() {
             }
 
             val verifiedQuery = (cleanInput as SearchQueryBuilder.Result.Valid).query
-            val parsedAttrs = demoAiProvider.recognizeFromText(verifiedQuery)
+            val parsedAttrs = aiProvider.recognizeFromText(verifiedQuery)
             val engine = if (parsedAttrs.recognitionSource == RecognitionSource.DEMO && parsedAttrs.isDemoFixture) {
                 demoMerchantDiscoveryEngine
             } else {
@@ -382,7 +384,9 @@ class MainActivity : ComponentActivity() {
                 isUncertain = parsedAttrs.status != RecognitionStatus.IDENTIFIED,
                 recognitionStatus = parsedAttrs.status,
                 candidates = parsedAttrs.candidates,
-                searchQuery = verifiedQuery
+                searchQuery = verifiedQuery,
+                recognitionSource = parsedAttrs.recognitionSource,
+                rateLimited = parsedAttrs.rateLimited
             )
 
             withContext(Dispatchers.Main) {

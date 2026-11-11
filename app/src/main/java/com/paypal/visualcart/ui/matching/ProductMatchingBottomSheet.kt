@@ -74,6 +74,7 @@ import com.paypal.visualcart.domain.model.AvailabilityStatus
 import com.paypal.visualcart.domain.model.ListingOrigin
 import com.paypal.visualcart.domain.model.MatchType
 import com.paypal.visualcart.domain.model.MerchantListing
+import com.paypal.visualcart.domain.model.RecognitionSource
 import com.paypal.visualcart.domain.model.RecognitionStatus
 import com.paypal.visualcart.domain.model.RecognizedProductCandidate
 import com.paypal.visualcart.domain.model.SourceType
@@ -95,7 +96,13 @@ data class DetectedProductMatchResult(
     val isUncertain: Boolean = false,
     val recognitionStatus: RecognitionStatus = RecognitionStatus.IDENTIFIED,
     val candidates: List<RecognizedProductCandidate> = emptyList(),
-    val searchQuery: String = detectedTitle
+    val searchQuery: String = detectedTitle,
+    val recognitionSource: RecognitionSource = when {
+        isLiveInference -> RecognitionSource.LIVE_AI
+        isDemoFixture -> RecognitionSource.DEMO
+        else -> RecognitionSource.LOCAL_OCR
+    },
+    val rateLimited: Boolean = false
 )
 
 data class MerchantListingItem(
@@ -200,7 +207,8 @@ fun ProductMatchingBottomSheet(
                     Spacer(modifier = Modifier.width(8.dp))
                     ProductOriginBadge(
                         isDemoFixture = detectedMatch.isDemoFixture,
-                        isLiveInference = detectedMatch.isLiveInference
+                        isLiveInference = detectedMatch.isLiveInference,
+                        recognitionSource = detectedMatch.recognitionSource
                     )
                 }
 
@@ -335,7 +343,7 @@ fun ProductMatchingBottomSheet(
                 0
             }
 
-            if (detectedMatch.isUncertain || detectedMatch.recognitionStatus != RecognitionStatus.IDENTIFIED) {
+            if (detectedMatch.rateLimited || detectedMatch.isUncertain || detectedMatch.recognitionStatus != RecognitionStatus.IDENTIFIED) {
                 Surface(
                     shape = RoundedCornerShape(10.dp),
                     color = TerracottaLight,
@@ -343,10 +351,10 @@ fun ProductMatchingBottomSheet(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text(
-                            text = if (detectedMatch.recognitionStatus == RecognitionStatus.UNIDENTIFIED) {
-                                "UNIDENTIFIED PRODUCT"
-                            } else {
-                                "UNCERTAIN VISUAL MATCH"
+                            text = when {
+                                detectedMatch.rateLimited -> "FREE AI LIMIT REACHED"
+                                detectedMatch.recognitionStatus == RecognitionStatus.UNIDENTIFIED -> "UNIDENTIFIED PRODUCT"
+                                else -> "UNCERTAIN VISUAL MATCH"
                             },
                             style = VisualCartTypography.labelSmall.copy(
                                 fontWeight = FontWeight.Bold,
@@ -355,7 +363,11 @@ fun ProductMatchingBottomSheet(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = detectedMatch.matchReason,
+                            text = if (detectedMatch.rateLimited && !detectedMatch.matchReason.contains("Free AI limit", ignoreCase = true)) {
+                                "Free AI limit reached. Try again later. Enter a product query manually or use direct merchant search links."
+                            } else {
+                                detectedMatch.matchReason
+                            },
                             style = VisualCartTypography.bodySmall.copy(color = DeepInk)
                         )
                         if (detectedMatch.candidates.isNotEmpty() && onRefineQuery != null) {
@@ -805,7 +817,9 @@ suspend fun resolveManualRefinedMatch(
         imageUri = existingImageUri,
         isUncertain = false,
         recognitionStatus = RecognitionStatus.IDENTIFIED,
-        searchQuery = validQuery
+        searchQuery = validQuery,
+        recognitionSource = RecognitionSource.MANUAL_SEARCH,
+        rateLimited = false
     )
 }
 

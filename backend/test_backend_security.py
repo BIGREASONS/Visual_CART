@@ -21,18 +21,31 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def isolate_offline_sandbox_tests(monkeypatch):
-    """Keeps offline/mocked backend tests deterministic even when .env contains live Sandbox keys."""
+    """Keeps offline/mocked backend tests deterministic even when .env contains live Sandbox/Gemini keys."""
     for env_key in (
         "PAYPAL_CLIENT_ID",
         "PAYPAL_CLIENT_SECRET",
         "PAYPAL_SANDBOX_CLIENT_ID",
         "PAYPAL_SANDBOX_CLIENT_SECRET",
+        "GEMINI_API_KEY",
+        "GEMINI_MODEL",
+        "GEMINI_FREE_TIER_ONLY",
+        "AI_MAX_COST_USD",
     ):
         monkeypatch.delenv(env_key, raising=False)
     monkeypatch.setattr("backend.main.paypal_client.client_id", "")
     monkeypatch.setattr("backend.main.paypal_client.client_secret", "")
     monkeypatch.setattr("backend.main.paypal_client._cached_token", None)
     monkeypatch.setattr("backend.main.paypal_client._token_expires_at", 0.0)
+    monkeypatch.setattr("backend.main.gemini_client.api_key", "")
+    monkeypatch.setattr("backend.main.gemini_client.model_name", "gemini-3.5-flash-lite")
+    monkeypatch.setattr("backend.main.gemini_client.free_tier_only", True)
+    monkeypatch.setattr("backend.main.gemini_client.max_cost_usd", 0.0)
+    monkeypatch.setattr("backend.main.gemini_client._rate_limit_until", 0.0)
+    monkeypatch.setattr("backend.main.gemini_client.api_requests_made", 0)
+    monkeypatch.setattr("backend.main.gemini_client.cache_hits", 0)
+    monkeypatch.setattr("backend.main.gemini_client.rate_limit_hits", 0)
+    monkeypatch.setattr("backend.main.gemini_client._cache", __import__("collections").OrderedDict())
 
 class TestZeroHardcodedSecrets:
     def test_paypal_client_defaults_empty_secrets(self, monkeypatch):
@@ -562,9 +575,6 @@ class TestVisualCartV12ImageAndMerchantPipeline:
 
         async def _fake_post(self, url, json=None, headers=None):
             calls.append({"url": url, "json": json, "headers": headers})
-            if len(calls) == 1:
-                # First model returns 404 -> must fall back to secondary active model
-                return _FakeResponse(404, {"error": {"message": "model unavailable"}})
             return _FakeResponse(
                 200,
                 {
@@ -575,17 +585,17 @@ class TestVisualCartV12ImageAndMerchantPipeline:
                                     {
                                         "text": _json.dumps(
                                             {
-                                                "status": "PARTIAL",
+                                                "identification_status": "PARTIAL",
                                                 "brand": None,
                                                 "product_name": "Galvanized Metal Pipes",
                                                 "category": "Industrial Materials",
                                                 "model": None,
                                                 "colour": "Silver",
                                                 "search_query": "metal pipes",
-                                                "specifications": {
-                                                    "Material": "Uncertain from image alone",
-                                                    "Specifications": "Not verified",
-                                                },
+                                                "specifications": [
+                                                    "Material: Uncertain from image alone",
+                                                    "Specifications: Not verified",
+                                                ],
                                                 "candidates": [
                                                     {
                                                         "title": "Galvanized Steel Pipes",
@@ -602,7 +612,12 @@ class TestVisualCartV12ImageAndMerchantPipeline:
                                 ]
                             }
                         }
-                    ]
+                    ],
+                    "usageMetadata": {
+                        "promptTokenCount": 42,
+                        "candidatesTokenCount": 68,
+                        "totalTokenCount": 110,
+                    },
                 },
             )
 
@@ -617,12 +632,14 @@ class TestVisualCartV12ImageAndMerchantPipeline:
             )
 
         result = asyncio.run(_run())
-        assert len(calls) == 2
-        # API key MUST be in header, never leaked in URL query parameter
-        for call in calls:
-            assert "key=" not in call["url"]
-            assert call["headers"]["x-goog-api-key"] == "test-gemini-secret-key"
-        parts = calls[1]["json"]["contents"][0]["parts"]
+        assert len(calls) == 1
+        assert "/models/gemini-3.5-flash-lite:generateContent" in calls[0]["url"]
+        assert "key=" not in calls[0]["url"]
+        assert calls[0]["headers"]["x-goog-api-key"] == "test-gemini-secret-key"
+        gen_cfg = calls[0]["json"]["generationConfig"]
+        assert gen_cfg["maxOutputTokens"] == 350
+        assert gen_cfg["thinkingConfig"] == {"thinkingLevel": "MINIMAL"}
+        parts = calls[0]["json"]["contents"][0]["parts"]
         assert parts[0]["inline_data"]["mime_type"] == "image/png"
         assert parts[0]["inline_data"]["data"] == png_1x1_b64
         prompt_text = parts[1]["text"]
@@ -630,10 +647,14 @@ class TestVisualCartV12ImageAndMerchantPipeline:
 
         assert result["category"] == "Industrial Materials"
         assert result["status"] == "PARTIAL"
+        assert result["identification_status"] == "PARTIAL"
+        assert result["recognition_source"] == "LIVE_AI"
+        assert result["model_name"] == "gemini-3.5-flash-lite"
         assert result["is_live_inference"] is True
         assert result["detected_mime_type"] == "image/png"
         assert result["image_dimensions"] == "1x1"
         assert result["estimated_price"] is None
+        assert result["token_usage"]["total_tokens"] == 110
 
     def test_merchants_search_rejects_noise_and_returns_unpriced_search_links(self):
         res_noise = client.get("/api/merchants/search", params={"q": "shared image.jpg"})
@@ -704,7 +725,190 @@ class TestVisualCartV12ImageAndMerchantPipeline:
         assert res.status_code == 200
         body = res.json()
         assert body["category"] == "Industrial Materials"
+        assert body["recognition_source"] == "LOCAL_OCR"
         assert "pipes" in body["title"].lower()
+
+    def test_free_tier_policy_rejects_paid_models_and_nonzero_budget(self):
+        from backend.gemini_client import (
+            FreeTierPolicyError,
+            validate_free_tier_configuration,
+        )
+
+        valid = validate_free_tier_configuration(
+            model_name="gemini-3.5-flash-lite",
+            free_tier_only=True,
+            max_cost_usd=0.0,
+        )
+        assert valid["model"] == "gemini-3.5-flash-lite"
+        assert valid["max_cost_usd"] == 0.0
+
+        for paid_model in ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.8-flash", "gemini-1.5-pro"):
+            with pytest.raises(FreeTierPolicyError):
+                GeminiClient(api_key="test-gemini-secret-key", model_name=paid_model)
+
+        with pytest.raises(FreeTierPolicyError):
+            GeminiClient(api_key="test-gemini-secret-key", free_tier_only=False)
+
+        with pytest.raises(FreeTierPolicyError):
+            GeminiClient(api_key="test-gemini-secret-key", max_cost_usd=1.0)
+
+        bad_res = client.post(
+            "/api/v1/ai/recognize-product",
+            json={"hint_text": "Logitech mouse", "model": "gemini-2.5-pro"},
+        )
+        assert bad_res.status_code == 400
+        assert "allowlist" in bad_res.json()["detail"].lower()
+
+    def test_rate_limit_429_stops_requests_immediately_without_paid_fallback(self, monkeypatch):
+        import base64
+        import httpx
+
+        png_1x1_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        )
+        calls = []
+
+        class _RateLimitResponse:
+            status_code = 429
+            headers = {"Retry-After": "45"}
+            text = '{"error":{"code":429,"message":"Quota exceeded"}}'
+
+        async def _fake_post_429(self, url, json=None, headers=None):
+            calls.append(url)
+            return _RateLimitResponse()
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post_429)
+
+        gemini = GeminiClient(api_key="test-gemini-secret-key")
+        first = asyncio.run(gemini.understand_product(image_base64=png_1x1_b64, mime_type="image/png"))
+        assert len(calls) == 1
+        assert first["rate_limited"] is True
+        assert first["error_code"] == "RATE_LIMIT_EXCEEDED"
+        assert first["diagnostic_note"] == "Free AI limit reached. Try again later."
+        assert first["recognition_source"] == "MANUAL_SEARCH"
+
+        # Second call during cooldown must NOT hit network at all, while falling back to Local OCR if hint exists
+        second = asyncio.run(
+            gemini.understand_product(
+                text="Logitech MX Master 3S mouse",
+                image_base64=png_1x1_b64,
+                mime_type="image/png",
+            )
+        )
+        assert len(calls) == 1
+        assert second["rate_limited"] is True
+        assert second["recognition_source"] == "LOCAL_OCR"
+        assert "Free AI limit reached" in second["diagnostic_note"]
+
+    def test_duplicate_image_hash_uses_cache_without_second_api_call(self, monkeypatch):
+        import base64
+        import json as _json
+        import httpx
+
+        png_1x1_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        )
+        calls = []
+
+        class _OkResponse:
+            status_code = 200
+            def json(self):
+                return {
+                    "candidates": [{
+                        "content": {
+                            "parts": [{
+                                "text": _json.dumps({
+                                    "brand": "Logitech",
+                                    "product_name": "Logitech Wireless Mouse",
+                                    "category": "Electronics",
+                                    "model": "M185",
+                                    "colour": "Black",
+                                    "specifications": ["Connectivity: 2.4GHz USB Receiver"],
+                                    "search_query": "Logitech M185 Wireless Mouse",
+                                    "confidence": 0.91,
+                                    "identification_status": "IDENTIFIED",
+                                })
+                            }]
+                        }
+                    }]
+                }
+
+        async def _fake_post_ok(self, url, json=None, headers=None):
+            calls.append(url)
+            return _OkResponse()
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post_ok)
+
+        gemini = GeminiClient(api_key="test-gemini-secret-key")
+        first = asyncio.run(gemini.understand_product(image_base64=png_1x1_b64, mime_type="image/png"))
+        second = asyncio.run(gemini.understand_product(image_base64=png_1x1_b64, mime_type="image/png"))
+
+        assert len(calls) == 1
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is True
+        assert second["api_requests_made"] == 1
+        assert second["product_name"] == "Logitech Wireless Mouse"
+
+    def test_invalid_api_key_corrupt_image_and_large_image_compression(self, monkeypatch):
+        import base64
+        import io
+        from PIL import Image
+        import httpx
+        from backend.gemini_client import inspect_image_payload, is_valid_api_key_format
+
+        assert is_valid_api_key_format("AQ.Ab8RN6ExampleValidFormat123456") is True
+        assert is_valid_api_key_format("AIzaSyExampleValidFormat123456") is True
+        assert is_valid_api_key_format("changeme") is False
+        assert is_valid_api_key_format("short") is False
+
+        async def _should_not_post(*args, **kwargs):
+            raise AssertionError("Network call must NOT happen for invalid keys or corrupt images")
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", _should_not_post)
+
+        # Invalid placeholder key -> zero API calls
+        bad_key_client = GeminiClient(api_key="placeholder")
+        res_bad_key = asyncio.run(bad_key_client.understand_product(image_base64=None))
+        assert res_bad_key["error_code"] == "INVALID_API_KEY"
+
+        # Corrupt JPEG header -> rejected before spending API quota
+        corrupt_b64 = base64.b64encode(b"\xff\xd8\xff\xe0\x00\x10JFIFCORRUPT_DATA").decode("ascii")
+        valid_client = GeminiClient(api_key="AQ.Ab8RN6TestKeyValidFormat123")
+        res_corrupt = asyncio.run(valid_client.understand_product(image_base64=corrupt_b64, mime_type="image/jpeg"))
+        assert res_corrupt["source"] == "corrupt_image"
+        assert res_corrupt["error_code"] == "CORRUPT_IMAGE"
+
+        # Oversized image > 1024px must be downscaled to minimize free quota consumption
+        big_img = Image.new("RGB", (1800, 1200), color=(40, 110, 80))
+        buf = io.BytesIO()
+        big_img.save(buf, format="PNG")
+        big_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        inspected = inspect_image_payload(big_b64, declared_mime="image/png")
+        assert inspected["valid"] is True
+        assert inspected["compressed"] is True
+        assert max(inspected["width"], inspected["height"]) <= 1024
+
+    def test_model_availability_check_uses_approved_free_model(self, monkeypatch):
+        import httpx
+
+        seen_urls = []
+
+        class _GetResponse:
+            status_code = 200
+
+        async def _fake_get(self, url, headers=None):
+            seen_urls.append((url, headers))
+            return _GetResponse()
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", _fake_get)
+        gemini = GeminiClient(api_key="AQ.Ab8RN6TestKeyValidFormat123")
+        status = asyncio.run(gemini.check_model_availability())
+        assert status["available"] is True
+        assert status["model"] == "gemini-3.5-flash-lite"
+        assert status["free_tier_only"] is True
+        assert "/models/gemini-3.5-flash-lite" in seen_urls[0][0]
+        assert seen_urls[0][1]["x-goog-api-key"] == "AQ.Ab8RN6TestKeyValidFormat123"
+
 
 
 

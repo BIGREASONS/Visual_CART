@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.paypal.visualcart.R
 import com.paypal.visualcart.domain.model.MatchType
+import com.paypal.visualcart.domain.model.RecognitionSource
 
 enum class ButtonVariant {
     PRIMARY,
@@ -218,6 +219,45 @@ fun VisualCartCard(
     }
 }
 
+@Composable
+private fun ProvenancePillBadge(
+    text: String,
+    backgroundColor: Color,
+    borderColor: Color,
+    dotColor: Color,
+    textColor: Color,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(4.dp),
+        color = backgroundColor,
+        border = BorderStroke(1.dp, borderColor)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(5.dp)
+                    .clip(CircleShape)
+                    .background(dotColor)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = text,
+                style = VisualCartTypography.labelSmall.copy(
+                    fontSize = 9.sp,
+                    letterSpacing = 0.8.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = textColor
+                )
+            )
+        }
+    }
+}
+
 /**
  * DemoDataBadge:
  * Small subtle tag "DEMO DATA" so hackathon test data is clearly identified
@@ -228,34 +268,14 @@ fun DemoDataBadge(
     modifier: Modifier = Modifier,
     text: String = "DEMO DATA"
 ) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(4.dp),
-        color = StoneLight,
-        border = BorderStroke(1.dp, Stone)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(5.dp)
-                    .clip(CircleShape)
-                    .background(Terracotta)
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = text,
-                style = VisualCartTypography.labelSmall.copy(
-                    fontSize = 9.sp,
-                    letterSpacing = 0.8.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MutedSlate
-                )
-            )
-        }
-    }
+    ProvenancePillBadge(
+        text = text,
+        backgroundColor = StoneLight,
+        borderColor = Stone,
+        dotColor = Terracotta,
+        textColor = MutedSlate,
+        modifier = modifier
+    )
 }
 
 /**
@@ -267,49 +287,75 @@ fun LiveInferenceBadge(
     modifier: Modifier = Modifier,
     text: String = "LIVE AI"
 ) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(4.dp),
-        color = ForestGreenLight,
-        border = BorderStroke(1.dp, ForestGreen.copy(alpha = 0.35f))
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(5.dp)
-                    .clip(CircleShape)
-                    .background(ForestGreen)
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = text,
-                style = VisualCartTypography.labelSmall.copy(
-                    fontSize = 9.sp,
-                    letterSpacing = 0.8.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = ForestGreenDark
-                )
-            )
-        }
-    }
+    ProvenancePillBadge(
+        text = text,
+        backgroundColor = ForestGreenLight,
+        borderColor = ForestGreen.copy(alpha = 0.35f),
+        dotColor = ForestGreen,
+        textColor = ForestGreenDark,
+        modifier = modifier
+    )
+}
+
+/**
+ * LocalOcrBadge:
+ * Indicates on-device heuristic / OCR fallback extraction (non-live).
+ */
+@Composable
+fun LocalOcrBadge(
+    modifier: Modifier = Modifier,
+    text: String = "LOCAL OCR"
+) {
+    ProvenancePillBadge(
+        text = text,
+        backgroundColor = StoneLight,
+        borderColor = Stone,
+        dotColor = DeepInk,
+        textColor = DeepInk,
+        modifier = modifier
+    )
+}
+
+/**
+ * ManualSearchBadge:
+ * Indicates explicit user-entered product search without automated AI identification.
+ */
+@Composable
+fun ManualSearchBadge(
+    modifier: Modifier = Modifier,
+    text: String = "MANUAL SEARCH"
+) {
+    ProvenancePillBadge(
+        text = text,
+        backgroundColor = TerracottaLight,
+        borderColor = Terracotta.copy(alpha = 0.35f),
+        dotColor = Terracotta,
+        textColor = Terracotta,
+        modifier = modifier
+    )
 }
 
 /**
  * ProductOriginBadge:
- * Renders either LiveInferenceBadge or DemoDataBadge based on product provenance.
+ * Renders provenance pill (`LIVE AI`, `DEMO DATA`, `LOCAL OCR`, or `MANUAL SEARCH`).
  */
 @Composable
 fun ProductOriginBadge(
-    isDemoFixture: Boolean,
+    isDemoFixture: Boolean = false,
     isLiveInference: Boolean = false,
+    recognitionSource: RecognitionSource? = null,
     modifier: Modifier = Modifier
 ) {
-    when {
-        isLiveInference -> LiveInferenceBadge(modifier = modifier)
-        isDemoFixture -> DemoDataBadge(modifier = modifier)
+    when (recognitionSource) {
+        RecognitionSource.LIVE_AI -> LiveInferenceBadge(modifier = modifier)
+        RecognitionSource.DEMO -> DemoDataBadge(modifier = modifier)
+        RecognitionSource.LOCAL_OCR -> LocalOcrBadge(modifier = modifier)
+        RecognitionSource.MANUAL_SEARCH -> ManualSearchBadge(modifier = modifier)
+        RecognitionSource.FALLBACK, null -> when {
+            isLiveInference -> LiveInferenceBadge(modifier = modifier)
+            isDemoFixture -> DemoDataBadge(modifier = modifier)
+            else -> LocalOcrBadge(modifier = modifier)
+        }
     }
 }
 

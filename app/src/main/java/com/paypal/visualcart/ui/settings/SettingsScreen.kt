@@ -80,8 +80,8 @@ import com.paypal.visualcart.core.designsystem.VisualCartTypography
 import com.paypal.visualcart.core.designsystem.WarmIvory
 
 enum class AiProviderOption(val title: String, val subtitle: String) {
-    ON_DEVICE_NANO("Local On-Device (Heuristic Parser)", "Private, offline attribute extraction and instant inference"),
-    CLOUD_GEMINI("Cloud Multimodal (Gemini Flash)", "Highest accuracy cross-merchant visual identification"),
+    ON_DEVICE_NANO("Local On-Device (Heuristic OCR)", "Offline text attribute extraction with zero cloud billing"),
+    CLOUD_GEMINI("Gemini 3.5 Flash-Lite (Free Tier)", "Google AI Studio free tier · \$0 spend cap · zero paid fallback"),
     DEMO_FIXTURES("Curated Demo Fixtures", "Deterministic sample listings for offline hackathon testing")
 }
 
@@ -93,7 +93,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     var floatingBubbleEnabled by remember { mutableStateOf(com.paypal.visualcart.service.overlay.VisualCartOverlayService.isRunning) }
     var demoDataEnabled by remember { mutableStateOf(true) }
-    var selectedAiProvider by remember { mutableStateOf(AiProviderOption.DEMO_FIXTURES) }
+    var selectedAiProvider by remember { mutableStateOf(AiProviderOption.CLOUD_GEMINI) }
     var showClearHistoryDialog by remember { mutableStateOf(false) }
 
     var hasOverlayPermission by remember {

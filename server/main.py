@@ -33,6 +33,23 @@ if (_root_dir / ".env").exists():
     load_dotenv(_root_dir / ".env")
 load_dotenv()
 
+_root_str = str(_root_dir)
+if _root_str not in sys.path:
+    sys.path.insert(0, _root_str)
+
+from backend.gemini_client import (  # noqa: E402
+    APPROVED_FREE_TIER_MODELS,
+    DEFAULT_GEMINI_MODEL,
+    FreeTierPolicyError,
+    GeminiClient,
+    validate_free_tier_configuration,
+)
+
+# Validate free-tier $0 policy strictly at backend startup
+validate_free_tier_configuration()
+_gemini_client_instance: Optional[GeminiClient] = None
+_gemini_client_signature: Optional[tuple] = None
+
 PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "").strip()
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
 PAYPAL_MODE = os.getenv("PAYPAL_MODE", os.getenv("PAYPAL_ENV", "sandbox")).strip().lower()
@@ -274,6 +291,7 @@ class RecognizeProductRequest(BaseModel):
     hint_text: Optional[str] = Field(default=None, description="OCR text, page title, or search prompt")
     text: Optional[str] = Field(default=None, description="Alias for client text query")
     context_text: Optional[str] = Field(default=None, description="Alias for client share context text")
+    model: Optional[str] = Field(default=None, description="Requested Gemini model (must be on free-tier allowlist)")
 
 
 class RecognizedProductResponse(BaseModel):
@@ -283,10 +301,12 @@ class RecognizedProductResponse(BaseModel):
     estimated_price: Optional[float] = None
     currency: str = Field(default_factory=lambda: DEFAULT_CURRENCY)
     specifications: Dict[str, str] = {}
+    specifications_list: List[str] = []
     match_reason: str
     confidence: float
     source: str
     status: str = "IDENTIFIED"
+    identification_status: str = "IDENTIFIED"
     recognition_source: str = "FALLBACK"
     product_name: Optional[str] = None
     model: Optional[str] = None
@@ -298,6 +318,12 @@ class RecognizedProductResponse(BaseModel):
     image_bytes_received: Optional[int] = None
     image_dimensions: Optional[str] = None
     detected_mime_type: Optional[str] = None
+    compressed_for_quota: bool = False
+    rate_limited: bool = False
+    cache_hit: bool = False
+    error_code: Optional[str] = None
+    api_requests_made: int = 0
+    token_usage: Optional[Dict[str, Any]] = None
     diagnostic_note: Optional[str] = None
 
 
@@ -953,22 +979,55 @@ async def mock_approve_page(order_id: str, return_url: str = "paypalvisualcart:/
 # Multimodal Gemini AI Product Recognition Proxy
 # ============================================================================
 
+def _get_gemini_client() -> GeminiClient:
+    """Returns a cached free-tier GeminiClient, re-initializing if env vars change."""
+    global _gemini_client_instance, _gemini_client_signature
+    policy = validate_free_tier_configuration()
+    current_key = get_gemini_api_key()
+    sig = (
+        current_key,
+        policy["model"],
+        policy["free_tier_only"],
+        policy["max_cost_usd"],
+    )
+    if _gemini_client_instance is None or _gemini_client_signature != sig:
+        _gemini_client_instance = GeminiClient(
+            api_key=current_key,
+            model_name=policy["model"],
+            free_tier_only=policy["free_tier_only"],
+            max_cost_usd=policy["max_cost_usd"],
+        )
+        _gemini_client_signature = sig
+    return _gemini_client_instance
+
+
+_get_gemini_client()
+
+
+@app.get("/api/v1/ai/model-status")
+async def ai_model_status():
+    """Checks approved free-tier Gemini model availability without paid fallback."""
+    try:
+        client = _get_gemini_client()
+    except FreeTierPolicyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await client.check_model_availability()
+
+
 @app.post("/api/v1/ai/recognize-product", response_model=RecognizedProductResponse)
 async def recognize_product(req: RecognizeProductRequest):
     """
     Proxies multimodal product visual recognition and text understanding to Google Gemini
-    (active models: gemini-3.8-flash -> gemini-3.5-flash-lite fallback) using validated
-    image binary magic bytes and a strict anti-hallucination prompt/schema.
+    using ONLY `gemini-3.5-flash-lite` on Google AI Studio's free tier (`$0` cap, zero paid fallback),
+    validated image binary magic bytes, SHA-256 content-hash caching, and anti-hallucination schema.
     """
-    root_str = str(_root_dir)
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
-    from backend.gemini_client import GeminiClient
+    try:
+        if req.model:
+            validate_free_tier_configuration(model_name=req.model)
+        client = _get_gemini_client()
+    except FreeTierPolicyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    client = GeminiClient(
-        api_key=get_gemini_api_key(),
-        model_name=(os.getenv("GEMINI_MODEL", "").strip() or None),
-    )
     effective_hint = (req.hint_text or req.text or req.context_text or "").strip()
     res = await client.understand_product(
         text=effective_hint or None,
@@ -984,10 +1043,12 @@ async def recognize_product(req: RecognizeProductRequest):
         estimated_price=res.get("estimated_price"),
         currency=res.get("currency") or DEFAULT_CURRENCY,
         specifications=res.get("specifications") or {},
+        specifications_list=res.get("specifications_list") or [],
         match_reason=res.get("match_reason") or "",
         confidence=float(res.get("confidence") or 0.0),
         source=res.get("source") or "fallback",
         status=res.get("status") or "UNIDENTIFIED",
+        identification_status=res.get("identification_status") or res.get("status") or "UNIDENTIFIED",
         recognition_source=res.get("recognition_source") or "FALLBACK",
         product_name=res.get("product_name"),
         model=res.get("model"),
@@ -999,6 +1060,12 @@ async def recognize_product(req: RecognizeProductRequest):
         image_bytes_received=res.get("image_bytes_received"),
         image_dimensions=res.get("image_dimensions"),
         detected_mime_type=res.get("detected_mime_type"),
+        compressed_for_quota=bool(res.get("compressed_for_quota")),
+        rate_limited=bool(res.get("rate_limited")),
+        cache_hit=bool(res.get("cache_hit")),
+        error_code=res.get("error_code"),
+        api_requests_made=int(res.get("api_requests_made") or 0),
+        token_usage=res.get("token_usage"),
         diagnostic_note=res.get("diagnostic_note"),
     )
 
@@ -1017,13 +1084,23 @@ async def search_merchants(q: str):
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    client = _get_gemini_client()
     return {
         "status": "healthy",
         "service": "paypal-visual-cart-backend",
         "has_paypal_credentials": has_live_paypal_credentials(),
         "has_gemini_api_key": bool(get_gemini_api_key()),
+        "gemini_configured": client.is_configured,
         "mode": PAYPAL_MODE,
-        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
+        "gemini_model": client.model_name,
+        "free_tier_only": client.free_tier_only,
+        "ai_max_cost_usd": client.max_cost_usd,
+        "paid_fallback_disabled": True,
+        "approved_models": list(APPROVED_FREE_TIER_MODELS),
+        "api_requests_made": client.api_requests_made,
+        "cache_hits": client.cache_hits,
+        "rate_limit_hits": client.rate_limit_hits,
+        "rate_limited": client.is_rate_limited,
         "timestamp": time.time(),
     }
 

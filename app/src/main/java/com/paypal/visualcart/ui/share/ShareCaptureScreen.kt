@@ -142,7 +142,8 @@ sealed interface ShareCaptureUiState {
         val imageUri: String? = null,
         val candidates: List<RecognizedProductCandidate> = emptyList(),
         val canRetry: Boolean = false,
-        val detectedCategory: String? = null
+        val detectedCategory: String? = null,
+        val rateLimited: Boolean = false
     ) : ShareCaptureUiState
 }
 
@@ -416,7 +417,8 @@ private fun ShareMatchedContent(
                     SpecTag(spec = state.product.category)
                     ProductOriginBadge(
                         isDemoFixture = state.product.isDemoFixture,
-                        isLiveInference = state.product.isLiveInference
+                        isLiveInference = state.product.isLiveInference,
+                        recognitionSource = state.product.recognitionSource
                     )
                 }
             }
@@ -424,7 +426,7 @@ private fun ShareMatchedContent(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        if (isUncertainMatch) {
+        if (state.product.rateLimited || isUncertainMatch) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -434,10 +436,10 @@ private fun ShareMatchedContent(
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
                 Text(
-                    text = if (state.product.candidates.size > 1) {
-                        "MULTIPLE VISUAL MATCHES · CONFIRM PRODUCT"
-                    } else {
-                        "PARTIAL IDENTIFICATION · VERIFY SEARCH QUERY"
+                    text = when {
+                        state.product.rateLimited -> "FREE AI LIMIT REACHED"
+                        state.product.candidates.size > 1 -> "MULTIPLE VISUAL MATCHES · CONFIRM PRODUCT"
+                        else -> "PARTIAL IDENTIFICATION · VERIFY SEARCH QUERY"
                     },
                     style = VisualCartTypography.labelSmall.copy(
                         fontWeight = FontWeight.Bold,
@@ -911,10 +913,10 @@ private fun ShareNeedsQueryContent(
         }
 
         Text(
-            text = "Identify This Product",
+            text = if (state.rateLimited) "Free AI Limit Reached" else "Identify This Product",
             style = VisualCartTypography.titleMedium.copy(
                 fontWeight = FontWeight.Bold,
-                color = DeepInk
+                color = if (state.rateLimited) Terracotta else DeepInk
             )
         )
         Spacer(modifier = Modifier.height(6.dp))

@@ -98,6 +98,7 @@ class MultimodalProductUnderstandingTest {
     @Test
     fun testRecognizeFromImageWithBackendProxyTransport() = runBlocking {
         var recordedUrl: String? = null
+        var recordedHeaders: Map<String, String> = emptyMap()
         var recordedBody: String? = null
 
         val mockBackendResponse = """
@@ -153,6 +154,7 @@ class MultimodalProductUnderstandingTest {
     @Test
     fun testRecognizeFromImageWithDirectGeminiKey() = runBlocking {
         var recordedUrl: String? = null
+        var recordedHeaders: Map<String, String> = emptyMap()
         var recordedBody: String? = null
 
         val mockGeminiResponse = """
@@ -171,8 +173,9 @@ class MultimodalProductUnderstandingTest {
             }
         """.trimIndent()
 
-        val mockTransport = NetworkTransport { url, _, body ->
+        val mockTransport = NetworkTransport { url, headers, body ->
             recordedUrl = url
+            recordedHeaders = headers
             recordedBody = body
             NetworkResponse(statusCode = 200, body = mockGeminiResponse)
         }
@@ -180,7 +183,7 @@ class MultimodalProductUnderstandingTest {
         val provider = CloudProductUnderstandingProvider(
             apiKey = "AIzaSyFakeGeminiApiKey12345",
             endpointUrl = null,
-            modelName = "gemini-2.5-flash",
+            modelName = "gemini-3.5-flash-lite",
             networkTransport = mockTransport
         )
 
@@ -193,10 +196,14 @@ class MultimodalProductUnderstandingTest {
 
         assertNotNull(recordedUrl)
         assertTrue("URL should hit Google Generative Language API", recordedUrl!!.contains("generativelanguage.googleapis.com"))
-        assertTrue("URL should specify gemini-2.5-flash", recordedUrl!!.contains("gemini-2.5-flash"))
-        assertTrue("URL should contain api key parameter", recordedUrl!!.contains("key=AIzaSyFakeGeminiApiKey12345"))
+        assertTrue("URL should specify gemini-3.5-flash-lite", recordedUrl!!.contains("gemini-3.5-flash-lite"))
+        assertFalse("API key must NOT be leaked in URL query string", recordedUrl!!.contains("key="))
+        assertEquals("AIzaSyFakeGeminiApiKey12345", recordedHeaders["x-goog-api-key"])
 
         assertNotNull(recordedBody)
+        assertTrue("Body should include systemInstruction", recordedBody!!.contains("\"systemInstruction\""))
+        assertTrue("Body should include thinkingConfig", recordedBody!!.contains("\"thinkingConfig\""))
+        assertTrue("Body should include maxOutputTokens", recordedBody!!.contains("\"maxOutputTokens\""))
         assertTrue("Body should contain inlineData", recordedBody!!.contains("\"inlineData\""))
         assertTrue("Body should contain image/png", recordedBody!!.contains("\"mimeType\":\"image/png\""))
         assertTrue("Body should specify application/json response", recordedBody!!.contains("responseMimeType") && recordedBody!!.contains("application/json"))
@@ -368,7 +375,7 @@ class MultimodalProductUnderstandingTest {
         }
 
         val provider = CloudProductUnderstandingProvider(
-            apiKey = "DUMMY_KEY",
+            apiKey = "AQ.TestMockKey1234567890",
             networkTransport = mockTransport
         )
 

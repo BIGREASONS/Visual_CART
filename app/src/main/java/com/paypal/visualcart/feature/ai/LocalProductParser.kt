@@ -88,7 +88,7 @@ object LocalProductParser {
                 isDemoFixture = false,
                 isLiveInference = false,
                 status = RecognitionStatus.UNIDENTIFIED,
-                recognitionSource = RecognitionSource.FALLBACK,
+                recognitionSource = RecognitionSource.MANUAL_SEARCH,
                 searchQuery = ""
             )
         }
@@ -137,7 +137,7 @@ object LocalProductParser {
             isDemoFixture = false,
             isLiveInference = false,
             status = status,
-            recognitionSource = RecognitionSource.FALLBACK,
+            recognitionSource = RecognitionSource.LOCAL_OCR,
             searchQuery = canonicalSearch
         )
     }

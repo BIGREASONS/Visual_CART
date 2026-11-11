@@ -1,7 +1,7 @@
 """FastAPI Backend Server for PayPal Visual Cart.
 
 Provides unified gateway endpoints for:
-1. Multimodal AI Product Understanding (Gemini 1.5 Flash / Pro proxy)
+1. Multimodal AI Product Understanding (Gemini 3.5 Flash-Lite free-tier proxy)
 2. PayPal Orders v2 Sandbox Integration (create-order, capture-order)
 3. Multi-Merchant discovery aggregator
 """
@@ -24,12 +24,17 @@ if (_root_dir / ".env").exists():
 load_dotenv()
 
 from .paypal_client import PayPalClient, PayPalError
-from .gemini_client import GeminiClient
+from .gemini_client import (
+    APPROVED_FREE_TIER_MODELS,
+    FreeTierPolicyError,
+    GeminiClient,
+    validate_free_tier_configuration,
+)
 
 app = FastAPI(
     title="PayPal Visual Cart Gateway API",
-    description="Multimodal AI shopping backend integrating Gemini 1.5 and PayPal Orders v2 API",
-    version="1.0.0"
+    description="Multimodal AI shopping backend integrating Gemini 3.5 Flash-Lite (free tier only) and PayPal Orders v2 API",
+    version="1.1.0"
 )
 
 # CORS configuration
@@ -42,6 +47,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+validate_free_tier_configuration()
 paypal_client = PayPalClient()
 gemini_client = GeminiClient()
 
@@ -103,47 +109,59 @@ def health_check():
         "status": "healthy",
         "environment": os.getenv("PAYPAL_ENV", "sandbox"),
         "paypal_base_url": paypal_client.base_url,
-        "gemini_model": gemini_client.model_name
+        "gemini_model": gemini_client.model_name,
+        "free_tier_only": gemini_client.free_tier_only,
+        "ai_max_cost_usd": gemini_client.max_cost_usd,
+        "paid_fallback_disabled": True,
+        "approved_models": list(APPROVED_FREE_TIER_MODELS),
+        "api_requests_made": gemini_client.api_requests_made,
+        "cache_hits": gemini_client.cache_hits,
+        "rate_limit_hits": gemini_client.rate_limit_hits,
+        "rate_limited": gemini_client.is_rate_limited,
     }
+
+
+@app.get("/api/v1/ai/model-status")
+async def ai_model_status():
+    return await gemini_client.check_model_availability()
+
+
+async def _handle_recognize_request(req: RecognizeRequest) -> Dict[str, Any]:
+    if req.model:
+        try:
+            validate_free_tier_configuration(model_name=req.model)
+        except FreeTierPolicyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        effective_hint = getattr(req, "hint_text", None) or req.text or req.context_text
+        result = await gemini_client.understand_product(
+            text=effective_hint,
+            hint_text=getattr(req, "hint_text", None),
+            image_base64=req.image_base64,
+            mime_type=req.mime_type,
+        )
+        return {
+            "http_status": "success",
+            "data": result,
+            **result,
+        }
+    except FreeTierPolicyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Multimodal recognition failed: {type(e).__name__}")
+
 
 @app.post("/api/v1/ai/recognize-product")
 async def recognize_product_v1(req: RecognizeRequest):
     """Primary multimodal recognition gateway keeping Gemini API keys secure server-side.
     Returns canonical product identity, recognition status, confidence, and sanitized search query.
     """
-    try:
-        effective_hint = getattr(req, "hint_text", None) or req.text or req.context_text
-        result = await gemini_client.understand_product(
-            text=effective_hint,
-            hint_text=getattr(req, "hint_text", None),
-            image_base64=req.image_base64,
-            mime_type=req.mime_type,
-        )
-        return {
-            "http_status": "success",
-            "data": result,
-            **result,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Multimodal recognition failed: {type(e).__name__}")
+    return await _handle_recognize_request(req)
+
 
 @app.post("/api/ai/recognize")
 async def recognize_product(req: RecognizeRequest):
-    try:
-        effective_hint = getattr(req, "hint_text", None) or req.text or req.context_text
-        result = await gemini_client.understand_product(
-            text=effective_hint,
-            hint_text=getattr(req, "hint_text", None),
-            image_base64=req.image_base64,
-            mime_type=req.mime_type,
-        )
-        return {
-            "http_status": "success",
-            "data": result,
-            **result,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Multimodal recognition failed: {type(e).__name__}")
+    return await _handle_recognize_request(req)
 
 @app.get("/api/v1/payments/paypal/configuration")
 @app.get("/api/paypal/configuration")

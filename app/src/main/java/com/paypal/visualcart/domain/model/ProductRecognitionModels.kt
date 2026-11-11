@@ -11,6 +11,8 @@ enum class RecognitionStatus {
 enum class RecognitionSource {
     LIVE_AI,
     DEMO,
+    LOCAL_OCR,
+    MANUAL_SEARCH,
     FALLBACK
 }
 
@@ -59,7 +61,9 @@ data class RecognizedProduct(
     val searchQuery: String = "",
     val aiModelName: String? = null,
     val candidates: List<RecognizedProductCandidate> = emptyList(),
-    val diagnosticNote: String? = null
+    val diagnosticNote: String? = null,
+    val rateLimited: Boolean = false,
+    val cacheHit: Boolean = false
 ) {
     val isIdentified: Boolean
         get() = status == RecognitionStatus.IDENTIFIED
@@ -105,7 +109,9 @@ data class StructuredAiProduct(
     val searchQuery: String = "",
     val aiModelName: String? = null,
     val candidates: List<RecognizedProductCandidate> = emptyList(),
-    val diagnosticNote: String? = null
+    val diagnosticNote: String? = null,
+    val rateLimited: Boolean = false,
+    val cacheHit: Boolean = false
 )
 
 /**
