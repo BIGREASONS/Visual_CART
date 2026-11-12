@@ -238,15 +238,6 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-## 👨‍💻 Author & Lead Contributor
-
-**Vaibhav Kumar Singh** ([@BIGREASONS](https://github.com/BIGREASONS))
-- **Role**: Lead Architect & Developer — Android Architecture (Kotlin, Jetpack Compose, Material 3), Circle to Shop MediaProjection Engine, PayPal Orders v2 Integration, Multimodal AI Engineering, and FastAPI Gateway.
-- **GitHub**: [github.com/BIGREASONS](https://github.com/BIGREASONS)
-- **Portfolio**: [vaibhavos.vercel.app](https://vaibhavos.vercel.app/)
-
----
-
 ## 📄 License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
