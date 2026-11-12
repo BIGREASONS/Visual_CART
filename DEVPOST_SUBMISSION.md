@@ -5,7 +5,7 @@
 - **Project Title**: PayPal Visual Cart: Universal AI Shopping Companion
 - **Tagline**: *"See it. Save it. Find it. Pay with PayPal."*
 - **Track**: PayPal AI Hackathon — Innovate Commerce with AI & PayPal
-- **Team**: PayPal Visual Cart Contributors
+- **Team**: Vaibhav Kumar Singh ([@BIGREASONS](https://github.com/BIGREASONS))
 - **Repository**: [GitHub Repository](https://github.com/paypal-visual-cart/visual-cart)
 - **Demo Video Duration**: 2 minutes 40 seconds (Strictly under 3 minutes)
 
@@ -152,3 +152,13 @@ PayPal Visual Cart is engineered using **Clean Architecture** and **MVVM** princ
 1. **Autonomous Price Drop Tracking**: Background WorkManager jobs to monitor price drops and notify users when a saved item drops below their target threshold.
 2. **Universal Multi-Merchant Cart Aggregation**: Consolidating multiple products from 3 different stores into a single bundled PayPal transaction.
 3. **Universal Commerce Protocol (UCP) Federation**: Enabling decentralized AI shopping agents to negotiate order fulfillment directly with participating merchants.
+
+---
+
+## Built By
+
+**Vaibhav Kumar Singh** ([@BIGREASONS](https://github.com/BIGREASONS))
+- Full-Stack & Android Architecture Lead
+- Portfolio: [vaibhavos.vercel.app](https://vaibhavos.vercel.app/)
+- GitHub: [github.com/BIGREASONS](https://github.com/BIGREASONS)
+
