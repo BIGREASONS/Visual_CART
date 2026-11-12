@@ -107,6 +107,16 @@ PayPal Visual Cart is engineered using **Clean Architecture** and **MVVM** princ
 - **Transparent Order Breakdown**: Subtotal, GST (18%), delivery calculations, and PayPal Buyer Protection guarantees
 - **Smart Routing**: Dual-path routing (Integrated Sandbox Checkout vs Verified Merchant Custom Tabs fallback with security disclaimers)
 
+### Technologies & Sponsor Integrations Used
+- **PayPal Orders v2 API**: Core checkout, authorization, capture, and buyer protection guarantees.
+- **Google Gemini 3.5 Flash Lite**: Multimodal vision model extracting canonical brand, model, and hardware specs into structured JSON.
+- **Channel3 API**: Universal multi-merchant product catalog search, offer aggregation, and live pricing.
+- **Postman**: API collection testing for PayPal Orders v2 endpoints and webhook mock verification.
+- **APIMatic**: OpenAPI 3.1 specification modeling and client contract verification.
+- **FastAPI & Uvicorn**: High-performance asynchronous backend gateway.
+- **Android Jetpack Compose & M3**: Declarative editorial fintech UI, custom Canvas bezier price graphs, and Material 3 design tokens.
+- **Android MediaProjection**: Pre-armed foreground capture service enabling Circle to Shop across external video apps without pausing playback.
+
 ---
 
 ## Challenges We Overcame

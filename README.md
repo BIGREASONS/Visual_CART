@@ -130,7 +130,7 @@ PayPal Visual Cart is built using **Clean Architecture** and **MVVM** principles
 ## 3. Product Recognition & Matching Engine
 
 - **Cloud Multimodal Vision (`CloudProductUnderstandingProvider.kt`)**:
-  - Leverages Google Gemini Multimodal Vision (`gemini-2.5-flash` default, configurable to `gemini-3.8-flash`) via structured JSON schema output (`generationConfig.response_mime_type = "application/json"`).
+  - Leverages Google Gemini Multimodal Vision (`gemini-3.5-flash-lite`) via structured JSON schema output (`generationConfig.response_mime_type = "application/json"`).
   - Extracts canonical title, brand, category, and technical hardware specifications without conversational filler.
 - **On-Device Spec Parser (`LocalProductParser.kt`)**:
   - Regex pattern matching for electronic capacities (e.g., `1TB`, `512GB`, `2TB`), memory types (`NVMe`, `PCIe 4.0`, `M.2 2280`), RAM, form factors, apparel sizes (`UK 9`, `US 10`), and model numbers.
@@ -220,6 +220,21 @@ python -m venv venv
 pip install -r backend/requirements.txt
 uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+---
+
+## 🛠️ Technologies & Tools Used (Including Sponsors)
+
+| Technology / Tool | Category | Role in PayPal Visual Cart |
+| :--- | :--- | :--- |
+| **PayPal Orders v2 API** | Payments & Checkout | Native checkout lifecycle: OAuth 2.0, order creation, buyer approval, and idempotent capture with `PayPal-Request-Id`. |
+| **Google Gemini 3.5 Flash Lite** | Multimodal AI | Analyzes circled screen captures & screenshots to extract canonical brand, model, and hardware specs into structured JSON. |
+| **Channel3 API** | Commerce Discovery | Universal multi-merchant product catalog search, offer aggregation, and live pricing. |
+| **Postman** | Developer Tool / Sponsor | Automated testing collection for PayPal Orders v2 endpoints, webhook mock payloads, and API contract verification. |
+| **APIMatic** | Developer Tool / Sponsor | OpenAPI 3.1 contract modeling, SDK generation validation, and schema consistency checking. |
+| **FastAPI & Uvicorn** | Backend Gateway | Asynchronous Python gateway orchestrating multimodal vision and merchant discovery with resilient retry handling. |
+| **Android Jetpack Compose & M3** | Mobile UI | Declarative editorial fintech UI, custom Canvas bezier price observation graphs, and Material 3 design tokens. |
+| **Android MediaProjection** | System Capture | Pre-armed foreground capture service enabling Circle to Shop across external video apps without pausing playback. |
 
 ---
 
