@@ -34,16 +34,16 @@ PayPal Visual Cart breaks away from generic e-commerce templates, employing a be
 
 | Document | Description |
 | :--- | :--- |
-| **[`HACKATHON_COMPLIANCE.md`](file:///c:/Users/singh/Documents/antigravity/ez/HACKATHON_COMPLIANCE.md)** | Comprehensive checklist of all Devpost criteria (Technological Implementation, Design, Impact, Innovation, Presentation), evidence, and status. |
-| **[`DEVPOST_SUBMISSION.md`](file:///c:/Users/singh/Documents/antigravity/ez/DEVPOST_SUBMISSION.md)** | Full hackathon submission draft including project title, tagline, problem statement, architecture, AI tools used, PayPal capabilities used, and impact narrative. |
-| **[`DEMO_SCRIPT.md`](file:///c:/Users/singh/Documents/antigravity/ez/DEMO_SCRIPT.md)** | Exact video demo script and storyboard strictly under 3 minutes (target ~2m40s) detailing the exact 6 scenes. |
-| **[`AI_ARCHITECTURE.md`](file:///c:/Users/singh/Documents/antigravity/ez/AI_ARCHITECTURE.md)** | Technical doc explaining multimodal vision model, prompt design, structured JSON output, canonicalization, and fallback. |
-| **[`PAYPAL_INTEGRATION.md`](file:///c:/Users/singh/Documents/antigravity/ez/PAYPAL_INTEGRATION.md)** | Technical doc explaining Orders v2 API, OAuth, sandbox workflow, create-order, buyer approval, capture-order, and security guarantees. |
-| **[`SETUP.md`](file:///c:/Users/singh/Documents/antigravity/ez/SETUP.md)** | Step-by-step developer instructions for running the Android app and the FastAPI backend with sandbox credentials. |
-| **[`ARCHITECTURE.md`](file:///c:/Users/singh/Documents/antigravity/ez/ARCHITECTURE.md)** | System design, sequence diagrams, and relational database ERD. |
-| **[`docs/reference-implementation-review.md`](file:///c:/Users/singh/Documents/antigravity/ez/docs/reference-implementation-review.md)** | Academic-grade report on Android Sharing, PayPal Orders v2, Gemini multimodal, and UCP / Google AP2. |
-| **[`LICENSE`](file:///c:/Users/singh/Documents/antigravity/ez/LICENSE)** | Official MIT License (2026). |
-| **[`.env.example`](file:///c:/Users/singh/Documents/antigravity/ez/.env.example)** | Safe configuration template for backend and client endpoints. |
+| **[`HACKATHON_COMPLIANCE.md`](HACKATHON_COMPLIANCE.md)** | Comprehensive checklist of all Devpost criteria (Technological Implementation, Design, Impact, Innovation, Presentation), evidence, and status. |
+| **[`DEVPOST_SUBMISSION.md`](DEVPOST_SUBMISSION.md)** | Full hackathon submission draft including project title, tagline, problem statement, architecture, AI tools used, PayPal capabilities used, and impact narrative. |
+| **[`DEMO_SCRIPT.md`](DEMO_SCRIPT.md)** | Exact video demo script and storyboard strictly under 3 minutes (target ~2m40s) detailing the exact 6 scenes. |
+| **[`AI_ARCHITECTURE.md`](AI_ARCHITECTURE.md)** | Technical doc explaining multimodal vision model, prompt design, structured JSON output, canonicalization, and fallback. |
+| **[`PAYPAL_INTEGRATION.md`](PAYPAL_INTEGRATION.md)** | Technical doc explaining Orders v2 API, OAuth, sandbox workflow, create-order, buyer approval, capture-order, and security guarantees. |
+| **[`SETUP.md`](SETUP.md)** | Step-by-step developer instructions for running the Android app and the FastAPI backend with sandbox credentials. |
+| **[`ARCHITECTURE.md`](ARCHITECTURE.md)** | System design, sequence diagrams, and relational database ERD. |
+| **[`docs/reference-implementation-review.md`](docs/reference-implementation-review.md)** | Academic-grade report on Android Sharing, PayPal Orders v2, Gemini multimodal, and UCP / Google AP2. |
+| **[`LICENSE`](LICENSE)** | Official MIT License (2026). |
+| **[`.env.example`](.env.example)** | Safe configuration template for backend and client endpoints. |
 
 ---
 
@@ -240,4 +240,4 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
 ## 📄 License
 
-This project is licensed under the MIT License — see the [LICENSE](file:///c:/Users/singh/Documents/antigravity/ez/LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

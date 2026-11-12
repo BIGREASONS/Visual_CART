@@ -114,7 +114,7 @@ Following official guidelines from [paypaldev/getting-started-with-paypal-sandbo
 Never commit credentials to version control. Set up the local `.env` file in the project root:
 
 ```bash
-# In the root of antigravity/ez:
+# In the root of Visual_CART:
 cp .env.example .env
 ```
 
