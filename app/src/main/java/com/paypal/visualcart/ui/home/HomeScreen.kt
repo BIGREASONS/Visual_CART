@@ -85,6 +85,9 @@ import com.paypal.visualcart.domain.model.AvailabilityStatus
 import com.paypal.visualcart.domain.model.MatchType
 import com.paypal.visualcart.domain.model.MerchantListing
 import com.paypal.visualcart.domain.model.SourceType
+import com.paypal.visualcart.feature.circle.CircleToShopSessionStore
+import com.paypal.visualcart.service.capture.CircleToShopCaptureService
+import com.paypal.visualcart.service.capture.CircleToShopConsentActivity
 import com.paypal.visualcart.service.overlay.VisualCartOverlayService
 
 /**
@@ -118,6 +121,7 @@ fun HomeScreen(
     val context = LocalContext.current
     var showAddCaptureDialog by remember { mutableStateOf(false) }
     val floatingBubbleEnabled by VisualCartOverlayService.isRunningFlow.collectAsState()
+    val circleToShopArmed by CircleToShopSessionStore.isArmed.collectAsState()
     var selectedCategoryFilter by remember { mutableStateOf<String?>(null) }
 
     val recentItems = remember {
@@ -409,6 +413,108 @@ fun HomeScreen(
                                     } else {
                                         VisualCartOverlayService.stop(context)
                                     }
+                                }
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = PureWhite,
+                                checkedTrackColor = ForestGreen,
+                                uncheckedThumbColor = MutedSlate,
+                                uncheckedTrackColor = StoneLight
+                            )
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Pre-armed Circle to Shop Toggle Card
+            Box(modifier = Modifier.padding(horizontal = 24.dp)) {
+                VisualCartCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = if (circleToShopArmed) SageLight else PureWhite
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(if (circleToShopArmed) ForestGreen else StoneLight),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = VisualCartIcons.ScanCamera,
+                                    contentDescription = null,
+                                    tint = if (circleToShopArmed) PureWhite else DeepInk,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = "Circle to Shop",
+                                        style = VisualCartTypography.titleSmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = DeepInk
+                                        )
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Surface(
+                                        color = if (circleToShopArmed) ForestGreenLight else StoneLight,
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            text = if (circleToShopArmed) "ARMED" else "READY",
+                                            style = VisualCartTypography.labelSmall.copy(
+                                                color = if (circleToShopArmed) ForestGreen else MutedSlate,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 9.sp
+                                            ),
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = if (circleToShopArmed) "Armed for Reels & Shorts · No video pauses" else "Pre-arm to circle without pausing video",
+                                    style = VisualCartTypography.bodySmall.copy(
+                                        color = if (circleToShopArmed) ForestGreen else MutedSlate,
+                                        fontSize = 11.sp
+                                    )
+                                )
+                            }
+                        }
+
+                        Switch(
+                            checked = circleToShopArmed,
+                            onCheckedChange = { isChecked ->
+                                if (isChecked) {
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
+                                        val intent = Intent(
+                                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                            Uri.parse("package:${context.packageName}")
+                                        )
+                                        context.startActivity(intent)
+                                    } else {
+                                        if (!floatingBubbleEnabled) {
+                                            VisualCartOverlayService.start(context)
+                                        }
+                                        val consentIntent = CircleToShopConsentActivity.createLaunchIntent(
+                                            context,
+                                            startImmediateSelection = false
+                                        )
+                                        context.startActivity(consentIntent)
+                                    }
+                                } else {
+                                    CircleToShopCaptureService.stopCapture(context)
                                 }
                             },
                             colors = SwitchDefaults.colors(

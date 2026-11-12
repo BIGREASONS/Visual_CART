@@ -29,7 +29,7 @@ Today, this results in **extreme cart fragmentation**:
 ### The Solution: PayPal Visual Cart
 **PayPal Visual Cart** transforms any mobile screen into a unified shopping cart:
 1. **Instant Visual Capture**: Using Android Direct Share or Google Circle to Search, share any image, screenshot, or product link directly to Visual Cart with zero friction.
-2. **Multimodal AI Product Understanding**: Google Gemini 1.5 Flash analyzes visual features, OCR text, and model numbers to extract canonical specs (e.g., *Crucial P3 Plus 1TB PCIe 4.0 NVMe M.2 2280*).
+2. **Multimodal AI Product Understanding**: Google Gemini 3.5 Flash Lite analyzes visual features, OCR text, and model numbers to extract canonical specs (e.g., *Crucial P3 Plus 1TB PCIe 4.0 NVMe M.2 2280*).
 3. **Cross-Merchant Price Discovery**: Concurrently searches competing retailers (Amazon, Flipkart, Croma, Reliance Digital, Myntra, Tata CLiQ) to find the verified lowest price, stock status, and savings.
 4. **Universal Persistent Cart**: Saves items into an editorial SQLite repository with historical 30-day price tracking.
 5. **One-Click PayPal Checkout**: Completes the purchase through PayPal Orders v2 API with PayPal Buyer Protection and transparent itemized breakdown.
@@ -64,7 +64,7 @@ PayPal Visual Cart is engineered using **Clean Architecture** and **MVVM** princ
 |                                       │                                     |
 |                                       ▼                                     |
 |                         [ ProductRecognitionEngine ]                        |
-|                         ├── Cloud: Gemini 1.5 Flash                         |
+|                         ├── Cloud: Gemini 3.5 Flash Lite                         |
 |                         └── Local: LocalProductParser (Regex)               |
 |                                       │                                     |
 |                                       ▼                                     |
@@ -82,7 +82,7 @@ PayPal Visual Cart is engineered using **Clean Architecture** and **MVVM** princ
 +─────────────────────────────────────────────────────────────────────────────+
 |                         FASTAPI BACKEND GATEWAY                             |
 |  +──────────────────────────────────+  +──────────────────────────────────+ |
-|  | Google Gemini 1.5 Flash Proxy    |  | PayPal Orders v2 API Client      | |
+|  | Google Gemini 3.5 Flash Lite Proxy    |  | PayPal Orders v2 API Client      | |
 |  | (Multimodal JSON Schema)         |  | (OAuth2, Create, Approve, Capture)| |
 |  +──────────────────────────────────+  +──────────────────────────────────+ |
 +─────────────────────────────────────────────────────────────────────────────+

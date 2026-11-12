@@ -14,6 +14,7 @@ Security & Anti-Hallucination Guarantees:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections import OrderedDict
 import hashlib
@@ -1041,11 +1042,27 @@ class GeminiClient:
             }
             url = f"{self.base_url}/models/{self.model_name}:generateContent"
 
-            # Single request ONLY — strictly no paid model fallback and no retry storms on 429.
+            # Transient upstream overload retry ONLY on HTTP 502/503/504 using the exact same
+            # approved free-tier model — strictly zero retries on 429 and zero paid fallback.
+            transient_delays = (0.4, 0.8)
             try:
                 async with httpx.AsyncClient(timeout=20.0) as client:
-                    self.api_requests_made += 1
-                    resp = await client.post(url, json=payload, headers=headers)
+                    resp = None
+                    for attempt in range(len(transient_delays) + 1):
+                        self.api_requests_made += 1
+                        resp = await client.post(url, json=payload, headers=headers)
+                        if resp.status_code in (502, 503, 504) and attempt < len(transient_delays):
+                            delay_s = transient_delays[attempt]
+                            logger.warning(
+                                "[VisualCartAI] req_id=%s model=%s transient_http=%s retrying_in=%.1fs",
+                                req_id,
+                                self.model_name,
+                                resp.status_code,
+                                delay_s,
+                            )
+                            await asyncio.sleep(delay_s)
+                            continue
+                        break
 
                 if resp.status_code == 429:
                     self.rate_limit_hits += 1

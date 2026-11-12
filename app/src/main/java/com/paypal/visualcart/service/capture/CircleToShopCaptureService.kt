@@ -11,11 +11,13 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
@@ -27,6 +29,7 @@ import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.paypal.visualcart.MainActivity
 import com.paypal.visualcart.R
+import com.paypal.visualcart.feature.circle.CircleCaptureSessionCoordinator
 import com.paypal.visualcart.feature.circle.CircleProjectionState
 import com.paypal.visualcart.feature.circle.CircleToShopSessionStore
 import com.paypal.visualcart.feature.circle.CropProcessingResult
@@ -48,13 +51,25 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
 /**
- * Foreground MediaProjection service for single-use Circle to Shop capture.
+ * Pre-Armed Foreground MediaProjection service for Circle to Shop.
  *
- * Enforces Android 14+ compliance:
- * - Never enters foreground with [ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION] before user consent.
- * - Consumes single-use grants atomically and clears all grant references immediately.
- * - Registers [MediaProjection.Callback] before creating a single [VirtualDisplay].
- * - Captures exactly one frame, stops projection immediately, crops locally, and discards full frame.
+ * Implements the pre-armed capture architecture:
+ * 1. Obtains MediaProjection consent once ahead of time while inside UniCart.
+ * 2. Starts foreground service with [ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION].
+ * 3. Registers [MediaProjection.Callback] BEFORE calling [MediaProjection.createVirtualDisplay].
+ * 4. Establishes ONE persistent VirtualDisplay and ONE ImageReader on a dedicated [HandlerThread].
+ * 5. Reuses the same VirtualDisplay and Surface across multiple user circle gestures;
+ *    NEVER calls createVirtualDisplay more than once on the same MediaProjection.
+ * 6. Drains incoming buffers immediately during idle/armed states (acquireLatestImage()?.close())
+ *    without reading pixels, creating bitmaps, or uploading screen data.
+ * 7. When the user taps Circle to Shop on the floating bubble while armed, triggers
+ *    [CircleSelectionOverlay] directly via WindowManager without launching any Activity,
+ *    preventing video players (Instagram Reels, YouTube Shorts, Chrome) from pausing playback.
+ * 8. Captures and locally crops exactly one clean frame upon gesture confirmation, releases
+ *    full-frame buffers immediately, hands off the crop token to [VisualCartShareActivity],
+ *    and returns to ARMED state.
+ * 9. Displays a persistent ongoing notification with an explicit "Stop" action and tears down
+ *    all resources upon user stop, switch disable, or system revocation.
  */
 class CircleToShopCaptureService : Service() {
 
@@ -66,8 +81,19 @@ class CircleToShopCaptureService : Service() {
         val frameHeightPx: Int
     )
 
+    private data class PendingCropTarget(
+        val sessionId: Long,
+        val bounds: NormalizedRectF,
+        val overlayW: Int,
+        val overlayH: Int,
+        val offsetX: Int,
+        val offsetY: Int,
+        val metrics: CaptureDisplayMetrics
+    )
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val coordinator = CircleCaptureSessionCoordinator()
 
     private var windowManager: WindowManager? = null
     private var projectionManager: MediaProjectionManager? = null
@@ -77,18 +103,28 @@ class CircleToShopCaptureService : Service() {
     private var imageReader: ImageReader? = null
     private var selectionOverlay: CircleSelectionOverlay? = null
 
+    private var drainThread: HandlerThread? = null
+    private var drainHandler: Handler? = null
+
     private var captureTimeoutRunnable: Runnable? = null
     private var processingJob: Job? = null
-    private val frameCaptured = AtomicBoolean(false)
+    private val isHandlingFrame = AtomicBoolean(false)
+    private val isFinalizeAwaitingFrame = AtomicBoolean(false)
+
+    @Volatile
+    private var pendingCapturedBitmap: Bitmap? = null
+
+    @Volatile
+    private var activeCropTarget: PendingCropTarget? = null
+
+    @Volatile
+    private var cachedMetrics: CaptureDisplayMetrics? = null
 
     @Volatile
     private var isTearingDownLocally = false
 
     @Volatile
     private var isServiceDestroyed = false
-
-    @Volatile
-    private var activeSessionId = 0L
 
     private var isForegroundStarted = false
 
@@ -103,18 +139,28 @@ class CircleToShopCaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP_CAPTURE -> {
-                Log.d(TAG, "Received ACTION_STOP_CAPTURE. Stopping capture immediately.")
+                Log.d(TAG, "Received ACTION_STOP_CAPTURE. Tearing down armed session.")
                 teardownAndStopService(finalState = CircleProjectionState.IDLE)
                 return START_NOT_STICKY
             }
 
-            ACTION_START_CIRCLE_CAPTURE -> {
-                val grantId = intent.getStringExtra(EXTRA_GRANT_ID)
-                var grant: PendingCaptureGrant? = if (!grantId.isNullOrBlank()) {
-                    CircleToShopSessionStore.consumeSingleUseGrant(grantId)
+            ACTION_TRIGGER_SELECTION -> {
+                Log.d(TAG, "Received ACTION_TRIGGER_SELECTION from floating bubble.")
+                if (coordinator.isArmed && mediaProjection != null && virtualDisplay != null) {
+                    startSelectionOverlay(coordinator.sessionId)
                 } else {
-                    null
+                    Log.w(TAG, "Session not armed or VirtualDisplay missing. Requesting fresh consent.")
+                    showToast("Circle to Shop not armed. Tap to enable.")
+                    teardownAndStopService(finalState = CircleProjectionState.IDLE)
                 }
+                return START_NOT_STICKY
+            }
+
+            ACTION_START_CIRCLE_CAPTURE -> {
+                val grantId = intent.getStringExtra(EXTRA_GRANT_ID).orEmpty()
+                val startImmediateSelection = intent.getBooleanExtra(EXTRA_START_IMMEDIATE_SELECTION, false)
+
+                var grant: PendingCaptureGrant? = CircleToShopSessionStore.consumeSingleUseGrant(grantId)
 
                 if (grant == null || !Settings.canDrawOverlays(this)) {
                     grant = null
@@ -122,18 +168,25 @@ class CircleToShopCaptureService : Service() {
                     Log.w(TAG, "Missing/expired Circle to Shop grant or overlay permission revoked.")
                     showToast(SESSION_EXPIRED_MESSAGE)
                     releaseSessionResources()
-                    CircleToShopSessionStore.markBubbleHiddenForCapture(false)
-                    CircleToShopSessionStore.updateState(CircleProjectionState.IDLE)
+                    coordinator.stopSession("Grant missing or expired")
                     stopSelf()
                     return START_NOT_STICKY
                 }
 
-                // Tear down any prior capture resources before initializing the fresh session.
+                // Tear down any prior capture resources before initializing the fresh armed session.
                 releaseSessionResources()
-                frameCaptured.set(false)
                 isTearingDownLocally = false
-                activeSessionId += 1L
-                val sessionId = activeSessionId
+
+                if (!coordinator.startSession(grant = grant, startImmediateSelection = startImmediateSelection)) {
+                    // Fallback if grant could not be started in coordinator
+                    grant = null
+                    showToast(SESSION_EXPIRED_MESSAGE)
+                    coordinator.stopSession("Coordinator start failed")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+
+                val sessionId = coordinator.sessionId
 
                 // Android 14+: startForeground(MEDIA_PROJECTION) must run after consent and before getMediaProjection.
                 try {
@@ -156,12 +209,11 @@ class CircleToShopCaptureService : Service() {
                     Log.e(TAG, "Failed to obtain MediaProjection: ${e.message}", e)
                     null
                 } finally {
-                    // Drop the Intent grant reference immediately so it is never retained.
                     grant = null
                 }
 
                 if (projection == null) {
-                    CircleToShopSessionStore.updateState(CircleProjectionState.REVOKED_OR_DENIED)
+                    coordinator.onProjectionRevoked()
                     showToast(SESSION_EXPIRED_MESSAGE)
                     teardownAndStopService(finalState = CircleProjectionState.IDLE)
                     return START_NOT_STICKY
@@ -169,22 +221,36 @@ class CircleToShopCaptureService : Service() {
 
                 mediaProjection = projection
 
-                // Android 14+: MediaProjection.Callback must be registered BEFORE createVirtualDisplay.
+                // Android 14+: Register MediaProjection.Callback BEFORE calling createVirtualDisplay.
                 val callback = object : MediaProjection.Callback() {
                     override fun onStop() {
-                        if (isTearingDownLocally || frameCaptured.get() || sessionId != activeSessionId) {
+                        if (isTearingDownLocally || sessionId != coordinator.sessionId) {
                             return
                         }
                         Log.w(TAG, "MediaProjection stopped externally via system or user.")
-                        CircleToShopSessionStore.updateState(CircleProjectionState.REVOKED_OR_DENIED)
+                        coordinator.onProjectionRevoked()
                         showToast("Screen capture stopped.")
                         teardownAndStopService(finalState = CircleProjectionState.IDLE)
                     }
                 }
                 projectionCallback = callback
                 projection.registerCallback(callback, mainHandler)
+                coordinator.registerProjectionCallback()
 
-                startSelectionOverlay(sessionId)
+                // Establish single background thread, ImageReader, and VirtualDisplay
+                if (!initializeVirtualDisplay(projection, sessionId)) {
+                    Log.e(TAG, "Failed to initialize VirtualDisplay for armed session.")
+                    showToast(PROTECTED_OR_FAILED_MESSAGE)
+                    teardownAndStopService(finalState = CircleProjectionState.IDLE)
+                    return START_NOT_STICKY
+                }
+
+                if (startImmediateSelection) {
+                    startSelectionOverlay(sessionId)
+                } else {
+                    Log.i(TAG, "Circle to Shop successfully pre-armed. Waiting for user bubble activation.")
+                }
+
                 return START_NOT_STICKY
             }
 
@@ -194,6 +260,115 @@ class CircleToShopCaptureService : Service() {
                 }
                 return START_NOT_STICKY
             }
+        }
+    }
+
+    private fun initializeVirtualDisplay(projection: MediaProjection, sessionId: Long): Boolean {
+        val thread = HandlerThread("CircleImageDrainThread").apply { start() }
+        drainThread = thread
+        val bgHandler = Handler(thread.looper)
+        drainHandler = bgHandler
+
+        val metrics = resolveDisplayMetrics()
+        cachedMetrics = metrics
+
+        val reader = try {
+            ImageReader.newInstance(
+                metrics.frameWidthPx,
+                metrics.frameHeightPx,
+                PixelFormat.RGBA_8888,
+                3
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to allocate ImageReader: ${e.message}", e)
+            return false
+        }
+        imageReader = reader
+
+        reader.setOnImageAvailableListener({ availableReader ->
+            if (sessionId != coordinator.sessionId || isServiceDestroyed || isTearingDownLocally) {
+                drainQuietly(availableReader)
+                return@setOnImageAvailableListener
+            }
+
+            if (coordinator.isAwaitingFrameCapture) {
+                val target = activeCropTarget
+                if (target == null || target.sessionId != sessionId) {
+                    drainQuietly(availableReader)
+                    return@setOnImageAvailableListener
+                }
+
+                val image = try {
+                    availableReader.acquireLatestImage()
+                } catch (e: Exception) {
+                    null
+                } ?: return@setOnImageAvailableListener
+
+                val plane = image.planes.firstOrNull()
+                val bitmap = if (plane != null) {
+                    try {
+                        CroppedImageProcessor.convertRgbaPlaneToBitmap(
+                            plane.buffer,
+                            image.width,
+                            image.height,
+                            plane.pixelStride,
+                            plane.rowStride
+                        )
+                    } catch (e: Exception) {
+                        null
+                    }
+                } else null
+                try {
+                    image.close()
+                } catch (_: Exception) {
+                }
+
+                if (bitmap != null) {
+                    val old = pendingCapturedBitmap
+                    pendingCapturedBitmap = bitmap
+                    if (old != null && old !== bitmap && !old.isRecycled) {
+                        old.recycle()
+                    }
+
+                    if (isFinalizeAwaitingFrame.compareAndSet(true, false)) {
+                        cancelTimeoutWatchdog()
+                        coordinator.onFrameAcquired()
+                        activeCropTarget = null
+                        pendingCapturedBitmap = null
+                        processCapturedFrameAsync(
+                            frameBitmap = bitmap,
+                            bounds = target.bounds,
+                            overlayW = target.overlayW,
+                            overlayH = target.overlayH,
+                            offsetX = target.offsetX,
+                            offsetY = target.offsetY,
+                            displayW = target.metrics.displayWidthPx,
+                            displayH = target.metrics.displayHeightPx
+                        )
+                    }
+                }
+            } else {
+                // Idle or selecting: drain buffers immediately with zero allocations or pixel reads.
+                drainQuietly(availableReader)
+            }
+        }, bgHandler)
+
+        try {
+            coordinator.recordVirtualDisplayCreated()
+            virtualDisplay = projection.createVirtualDisplay(
+                VIRTUAL_DISPLAY_NAME,
+                metrics.frameWidthPx,
+                metrics.frameHeightPx,
+                metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface,
+                null,
+                bgHandler
+            )
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create VirtualDisplay: ${e.message}", e)
+            return false
         }
     }
 
@@ -222,7 +397,7 @@ class CircleToShopCaptureService : Service() {
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Circle to Shop")
-            .setContentText("Screen capture active · Circle a product")
+            .setContentText("Screen capture armed · Tap bubble to circle a product")
             .setSmallIcon(R.drawable.ic_quick_settings_cart)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -251,7 +426,7 @@ class CircleToShopCaptureService : Service() {
                 "Circle to Shop Capture",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Active indicator during single-use Circle to Shop screen capture"
+                description = "Persistent indicator while Circle to Shop screen capture is armed"
                 setShowBadge(false)
             }
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -268,43 +443,43 @@ class CircleToShopCaptureService : Service() {
             return
         }
 
-        CircleToShopSessionStore.markBubbleHiddenForCapture(true)
-        CircleToShopSessionStore.updateState(CircleProjectionState.SELECTING)
+        if (!coordinator.triggerSelection()) {
+            Log.w(TAG, "Cannot trigger selection in current coordinator state.")
+            return
+        }
+
+        selectionOverlay?.dismiss()
 
         val overlay = CircleSelectionOverlay(this, wm)
         selectionOverlay = overlay
 
         overlay.show(
-            { bounds, overlayW, overlayH, offsetX, offsetY ->
-                if (isServiceDestroyed || isTearingDownLocally || sessionId != activeSessionId) {
+            onSelectionReady = { bounds, overlayW, overlayH, offsetX, offsetY ->
+                if (isServiceDestroyed || isTearingDownLocally || sessionId != coordinator.sessionId) {
                     return@show
                 }
+                prepareCleanFrameCapture(sessionId, bounds, overlayW, overlayH, offsetX, offsetY)
                 overlay.hideForCapture {
-                    if (isServiceDestroyed || isTearingDownLocally || sessionId != activeSessionId) {
+                    if (isServiceDestroyed || isTearingDownLocally || sessionId != coordinator.sessionId) {
                         return@hideForCapture
                     }
-                    captureSingleCleanFrame(
-                        sessionId = sessionId,
-                        bounds = bounds,
-                        overlayW = overlayW,
-                        overlayH = overlayH,
-                        offsetX = offsetX,
-                        offsetY = offsetY
-                    )
+                    selectionOverlay = null
+                    finalizeCleanFrameCapture(sessionId)
                 }
             },
-            { invalidMessage ->
+            onInvalidSelection = { invalidMessage ->
                 showToast(invalidMessage)
             },
-            {},
-            {
-                Log.d(TAG, "Selection overlay cancelled by user.")
-                teardownAndStopService(finalState = CircleProjectionState.IDLE)
+            onClear = {},
+            onCancel = {
+                Log.d(TAG, "Selection overlay cancelled by user. Returning to ARMED.")
+                selectionOverlay = null
+                coordinator.cancelSelection()
             }
         )
     }
 
-    private fun captureSingleCleanFrame(
+    private fun prepareCleanFrameCapture(
         sessionId: Long,
         bounds: NormalizedRectF,
         overlayW: Int,
@@ -312,124 +487,115 @@ class CircleToShopCaptureService : Service() {
         offsetX: Int,
         offsetY: Int
     ) {
-        val projection = mediaProjection
-        if (projection == null || isServiceDestroyed || isTearingDownLocally || sessionId != activeSessionId) {
-            handleCaptureFailure(PROTECTED_OR_FAILED_MESSAGE)
-            return
+        val metrics = cachedMetrics ?: resolveDisplayMetrics().also { cachedMetrics = it }
+        val target = PendingCropTarget(
+            sessionId = sessionId,
+            bounds = bounds,
+            overlayW = overlayW,
+            overlayH = overlayH,
+            offsetX = offsetX,
+            offsetY = offsetY,
+            metrics = metrics
+        )
+        activeCropTarget = target
+        isFinalizeAwaitingFrame.set(false)
+        val old = pendingCapturedBitmap
+        pendingCapturedBitmap = null
+        if (old != null && !old.isRecycled) {
+            old.recycle()
         }
+        coordinator.requestFrameCapture()
 
-        CircleToShopSessionStore.updateState(CircleProjectionState.CAPTURING)
-
-        val metrics = resolveDisplayMetrics()
-        val reader = try {
-            ImageReader.newInstance(
-                metrics.frameWidthPx,
-                metrics.frameHeightPx,
-                PixelFormat.RGBA_8888,
-                2
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to allocate ImageReader: ${e.message}", e)
-            handleCaptureFailure(PROTECTED_OR_FAILED_MESSAGE)
-            return
-        }
-        imageReader = reader
-
-        val timeoutRunnable = Runnable {
-            if (sessionId == activeSessionId && frameCaptured.compareAndSet(false, true)) {
-                Log.w(TAG, "Timed out waiting for VirtualDisplay frame (${CAPTURE_TIMEOUT_MS}ms).")
-                handleCaptureFailure(PROTECTED_OR_FAILED_MESSAGE)
-            }
-        }
-        captureTimeoutRunnable = timeoutRunnable
-        mainHandler.postDelayed(timeoutRunnable, CAPTURE_TIMEOUT_MS)
-
-        reader.setOnImageAvailableListener({ availableReader ->
-            if (sessionId != activeSessionId || isServiceDestroyed || isTearingDownLocally) {
-                drainQuietly(availableReader)
-                return@setOnImageAvailableListener
-            }
-
-            val image = try {
-                availableReader.acquireLatestImage()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to acquire ImageReader frame: ${e.message}", e)
-                null
-            } ?: return@setOnImageAvailableListener
-
-            if (!frameCaptured.compareAndSet(false, true)) {
+        // Force SurfaceFlinger to emit a fresh buffer even on static/paused screens.
+        // On stable video frames SurfaceFlinger only pushes dirty regions; a brief VirtualDisplay
+        // resize triggers a full composition pass that guarantees at least one new ImageReader buffer.
+        val vd = virtualDisplay
+        val reader = imageReader
+        if (vd != null && reader != null) {
+            drainHandler?.post {
                 try {
-                    image.close()
-                } catch (_: Exception) {
+                    // Temporarily shrink then restore to original dimensions — forces a full redraw.
+                    val w = reader.width
+                    val h = reader.height
+                    val dpi = metrics.densityDpi
+                    vd.resize(w - 1, h - 1, dpi)
+                    vd.resize(w, h, dpi)
+                } catch (e: Exception) {
+                    Log.w(TAG, "VirtualDisplay resize-to-force-frame failed: ${e.message}")
                 }
-                return@setOnImageAvailableListener
             }
+        }
+    }
 
-            cancelTimeoutWatchdog()
+    private fun finalizeCleanFrameCapture(sessionId: Long) {
+        val target = activeCropTarget
+        if (target == null || target.sessionId != sessionId || isServiceDestroyed || isTearingDownLocally) {
+            handleCaptureFailure(PROTECTED_OR_FAILED_MESSAGE)
+            return
+        }
 
-            var fullFrameBitmap: Bitmap? = null
+        // Check if the ImageReader already has a pending frame we haven't picked up yet.
+        // This handles the race where SurfaceFlinger delivered a frame between prepareCleanFrameCapture
+        // and the overlay finishing its hide animation — ImageReader holds it but the listener
+        // already ran and stored it, or it's sitting in the queue unprocessed.
+        val reader = imageReader
+        if (pendingCapturedBitmap == null && reader != null && coordinator.isAwaitingFrameCapture) {
             try {
-                val plane = image.planes.firstOrNull()
-                if (plane != null) {
-                    fullFrameBitmap = CroppedImageProcessor.convertRgbaPlaneToBitmap(
-                        plane.buffer,
-                        image.width,
-                        image.height,
-                        plane.pixelStride,
-                        plane.rowStride
-                    )
+                val image = reader.acquireLatestImage()
+                if (image != null) {
+                    val plane = image.planes.firstOrNull()
+                    val bmp = if (plane != null) {
+                        try {
+                            CroppedImageProcessor.convertRgbaPlaneToBitmap(
+                                plane.buffer, image.width, image.height,
+                                plane.pixelStride, plane.rowStride
+                            )
+                        } catch (e: Exception) { null }
+                    } else null
+                    try { image.close() } catch (_: Exception) { }
+                    if (bmp != null) {
+                        pendingCapturedBitmap = bmp
+                        Log.d(TAG, "finalizeCleanFrameCapture: eagerly grabbed pending frame ${bmp.width}x${bmp.height}")
+                    }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed converting RGBA plane to Bitmap: ${e.message}", e)
-            } finally {
-                try {
-                    image.close()
-                } catch (_: Exception) {
+                Log.w(TAG, "finalizeCleanFrameCapture eager poll failed: ${e.message}")
+            }
+        }
+
+        val bitmap = pendingCapturedBitmap
+        if (bitmap != null) {
+            cancelTimeoutWatchdog()
+            coordinator.onFrameAcquired()
+            activeCropTarget = null
+            pendingCapturedBitmap = null
+            processCapturedFrameAsync(
+                frameBitmap = bitmap,
+                bounds = target.bounds,
+                overlayW = target.overlayW,
+                overlayH = target.overlayH,
+                offsetX = target.offsetX,
+                offsetY = target.offsetY,
+                displayW = target.metrics.displayWidthPx,
+                displayH = target.metrics.displayHeightPx
+            )
+        } else {
+            isFinalizeAwaitingFrame.set(true)
+            val timeoutRunnable = Runnable {
+                if (sessionId == coordinator.sessionId && isFinalizeAwaitingFrame.compareAndSet(true, false)) {
+                    Log.w(TAG, "Timed out waiting for clean frame (${CAPTURE_TIMEOUT_MS}ms).")
+                    activeCropTarget = null
+                    val old = pendingCapturedBitmap
+                    pendingCapturedBitmap = null
+                    if (old != null && !old.isRecycled) {
+                        old.recycle()
+                    }
+                    coordinator.returnToArmedAfterCapture()
+                    handleCaptureFailure(PROTECTED_OR_FAILED_MESSAGE)
                 }
             }
-
-            // Immediately release VirtualDisplay, ImageReader, MediaProjection, and overlay once 1 frame is captured.
-            releaseSessionResources()
-
-            val capturedBitmap = fullFrameBitmap
-            if (capturedBitmap == null) {
-                handleCaptureFailure(PROTECTED_OR_FAILED_MESSAGE)
-                return@setOnImageAvailableListener
-            }
-
-            processCapturedFrameAsync(
-                frameBitmap = capturedBitmap,
-                bounds = bounds,
-                overlayW = overlayW,
-                overlayH = overlayH,
-                offsetX = offsetX,
-                offsetY = offsetY,
-                displayW = metrics.displayWidthPx,
-                displayH = metrics.displayHeightPx
-            )
-        }, mainHandler)
-
-        try {
-            virtualDisplay = projection.createVirtualDisplay(
-                VIRTUAL_DISPLAY_NAME,
-                metrics.frameWidthPx,
-                metrics.frameHeightPx,
-                metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.surface,
-                null,
-                mainHandler
-            )
-        } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException creating VirtualDisplay: ${e.message}", e)
-            if (frameCaptured.compareAndSet(false, true)) {
-                handleCaptureFailure(PROTECTED_OR_FAILED_MESSAGE)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create VirtualDisplay: ${e.message}", e)
-            if (frameCaptured.compareAndSet(false, true)) {
-                handleCaptureFailure(PROTECTED_OR_FAILED_MESSAGE)
-            }
+            captureTimeoutRunnable = timeoutRunnable
+            mainHandler.postDelayed(timeoutRunnable, CAPTURE_TIMEOUT_MS)
         }
     }
 
@@ -463,6 +629,7 @@ class CircleToShopCaptureService : Service() {
                         frameBitmap.recycle()
                     }
                     withContext(Dispatchers.Main) {
+                        coordinator.returnToArmedAfterCapture()
                         handleCaptureFailure(PROTECTED_OR_FAILED_MESSAGE)
                     }
                     return@launch
@@ -487,7 +654,8 @@ class CircleToShopCaptureService : Service() {
                         )
                         withContext(Dispatchers.Main) {
                             launchShareActivityWithCropResult(captureToken)
-                            teardownAndStopService(finalState = CircleProjectionState.IDLE)
+                            // Crucial: Keep session armed and ready for subsequent circles!
+                            coordinator.returnToArmedAfterCapture()
                         }
                     }
 
@@ -498,6 +666,7 @@ class CircleToShopCaptureService : Service() {
                             result.reason
                         }
                         withContext(Dispatchers.Main) {
+                            coordinator.returnToArmedAfterCapture()
                             handleCaptureFailure(errorMessage)
                         }
                     }
@@ -506,6 +675,7 @@ class CircleToShopCaptureService : Service() {
                 Log.e(TAG, "Unexpected error processing captured frame: ${t.message}", t)
                 withContext(Dispatchers.Main) {
                     if (!isServiceDestroyed) {
+                        coordinator.returnToArmedAfterCapture()
                         handleCaptureFailure(PROTECTED_OR_FAILED_MESSAGE)
                     }
                 }
@@ -606,14 +776,12 @@ class CircleToShopCaptureService : Service() {
     }
 
     private fun handleCaptureFailure(errorMessage: String) {
-        releaseSessionResources()
         launchShareActivityManualFallback(errorMessage)
-        teardownAndStopService(finalState = CircleProjectionState.IDLE)
     }
 
     private fun teardownAndStopService(finalState: CircleProjectionState) {
         releaseSessionResources()
-        CircleToShopSessionStore.markBubbleHiddenForCapture(false)
+        coordinator.stopSession("Teardown requested")
         CircleToShopSessionStore.updateState(finalState)
         stopSelf()
     }
@@ -621,6 +789,14 @@ class CircleToShopCaptureService : Service() {
     private fun releaseSessionResources() {
         isTearingDownLocally = true
         cancelTimeoutWatchdog()
+        activeCropTarget = null
+        isHandlingFrame.set(false)
+        isFinalizeAwaitingFrame.set(false)
+        val oldBitmap = pendingCapturedBitmap
+        pendingCapturedBitmap = null
+        if (oldBitmap != null && !oldBitmap.isRecycled) {
+            oldBitmap.recycle()
+        }
 
         selectionOverlay?.let { overlay ->
             try {
@@ -668,6 +844,16 @@ class CircleToShopCaptureService : Service() {
         }
         projectionCallback = null
         mediaProjection = null
+
+        drainThread?.let { thread ->
+            try {
+                thread.quitSafely()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error quitting drain thread: ${e.message}")
+            }
+        }
+        drainThread = null
+        drainHandler = null
     }
 
     private fun cancelTimeoutWatchdog() {
@@ -695,8 +881,7 @@ class CircleToShopCaptureService : Service() {
         releaseSessionResources()
         serviceScope.cancel()
 
-        CircleToShopSessionStore.markBubbleHiddenForCapture(false)
-        CircleToShopSessionStore.updateState(CircleProjectionState.IDLE)
+        coordinator.stopSession("Service destroyed")
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
@@ -721,19 +906,29 @@ class CircleToShopCaptureService : Service() {
             "This screen is protected (FLAG_SECURE) or could not be captured. Enter a product name to search manually."
 
         const val ACTION_START_CIRCLE_CAPTURE = "com.paypal.visualcart.action.START_CIRCLE_CAPTURE"
+        const val ACTION_TRIGGER_SELECTION = "com.paypal.visualcart.action.TRIGGER_SELECTION"
         const val ACTION_STOP_CAPTURE = "com.paypal.visualcart.action.STOP_CAPTURE"
         const val EXTRA_GRANT_ID = "extra_grant_id"
+        const val EXTRA_START_IMMEDIATE_SELECTION = "extra_start_immediate_selection"
 
-        fun startWithGrant(context: Context, grantId: String) {
+        fun startWithGrant(context: Context, grantId: String, startImmediateSelection: Boolean = false) {
             val intent = Intent(context, CircleToShopCaptureService::class.java).apply {
                 action = ACTION_START_CIRCLE_CAPTURE
                 putExtra(EXTRA_GRANT_ID, grantId)
+                putExtra(EXTRA_START_IMMEDIATE_SELECTION, startImmediateSelection)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
             }
+        }
+
+        fun triggerSelectionOverlay(context: Context) {
+            val intent = Intent(context, CircleToShopCaptureService::class.java).apply {
+                action = ACTION_TRIGGER_SELECTION
+            }
+            context.startService(intent)
         }
 
         fun stopCapture(context: Context) {

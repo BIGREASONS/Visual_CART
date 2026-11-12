@@ -108,8 +108,9 @@ class CircleToShopConsentActivity : ComponentActivity() {
         if (result.resultCode == Activity.RESULT_OK && data != null) {
             OverlayCapturePreferences.setCircleDisclosureAcknowledged(this, true)
             val grantId = CircleToShopSessionStore.storeSingleUseGrant(result.resultCode, data)
+            val startImmediateSelection = intent.getBooleanExtra(EXTRA_START_IMMEDIATE_SELECTION, false)
             try {
-                CircleToShopCaptureService.startWithGrant(this, grantId)
+                CircleToShopCaptureService.startWithGrant(this, grantId, startImmediateSelection)
                 handedOffToCaptureService = true
                 finishCleanly()
             } catch (e: Exception) {
@@ -139,6 +140,15 @@ class CircleToShopConsentActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        val startImmediateSelection = intent.getBooleanExtra(EXTRA_START_IMMEDIATE_SELECTION, false)
+        if (CircleToShopSessionStore.isArmed.value) {
+            if (startImmediateSelection) {
+                CircleToShopCaptureService.triggerSelectionOverlay(this)
+            }
+            finishCleanly()
+            return
+        }
 
         val disclosureAcknowledged = OverlayCapturePreferences.isCircleDisclosureAcknowledged(this)
         showDisclosureModal = OverlayCapturePreferences.shouldShowFirstTimeDisclosure(disclosureAcknowledged)
@@ -232,7 +242,13 @@ class CircleToShopConsentActivity : ComponentActivity() {
 
         isRequestingSystemConsent = true
         try {
-            mediaProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+            val captureIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val config = android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay()
+                projectionManager.createScreenCaptureIntent(config)
+            } else {
+                projectionManager.createScreenCaptureIntent()
+            }
+            mediaProjectionLauncher.launch(captureIntent)
         } catch (e: Exception) {
             isRequestingSystemConsent = false
             Log.e(TAG, "Failed to launch MediaProjection consent intent: ${e.message}", e)
@@ -265,12 +281,14 @@ class CircleToShopConsentActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "CircleConsentActivity"
+        const val EXTRA_START_IMMEDIATE_SELECTION = "extra_start_immediate_selection"
 
-        fun createLaunchIntent(context: Context): Intent {
+        fun createLaunchIntent(context: Context, startImmediateSelection: Boolean = false): Intent {
             return Intent(context, CircleToShopConsentActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                putExtra(EXTRA_START_IMMEDIATE_SELECTION, startImmediateSelection)
+                if (context !is Activity) {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
             }
         }
     }
@@ -347,7 +365,7 @@ private fun CircleToShopConsentModal(
                                 lineHeight = 24.sp
                             )
                             Text(
-                                text = "Single-use screen capture",
+                                text = "Pre-armed screen capture",
                                 color = MutedSlate,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Medium
@@ -372,7 +390,7 @@ private fun CircleToShopConsentModal(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "Allow Visual Cart to capture your screen once so you can circle a product directly from any app.",
+                    text = "Allow Visual Cart to capture your screen so you can circle products directly from any app without interrupting videos. If Android asks, select 'Entire screen'.",
                     color = DeepInk,
                     fontSize = 14.sp,
                     lineHeight = 20.sp

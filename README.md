@@ -5,7 +5,7 @@
   <img src="https://img.shields.io/badge/Language-Kotlin%202.2%2B-202B32?style=for-the-badge&logo=kotlin&logoColor=white" alt="Kotlin 2.2" />
   <img src="https://img.shields.io/badge/UI-Jetpack%20Compose%20%7C%20M3-356B57?style=for-the-badge&logo=jetpackcompose&logoColor=white" alt="Jetpack Compose" />
   <img src="https://img.shields.io/badge/Payment-PayPal%20Orders%20v2-003087?style=for-the-badge&logo=paypal&logoColor=white" alt="PayPal Orders v2" />
-  <img src="https://img.shields.io/badge/AI-Google%20Gemini%201.5%20Flash-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="Gemini 1.5 Flash" />
+  <img src="https://img.shields.io/badge/AI-Google%20Gemini%203.5%20Flash%20Lite-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="Gemini 3.5 Flash Lite" />
   <img src="https://img.shields.io/badge/License-MIT-C97858?style=for-the-badge" alt="License MIT" />
   <img src="https://img.shields.io/badge/Tests-100%25%20Passing-356B57?style=for-the-badge" alt="Tests 100% Passing" />
 </p>
@@ -74,7 +74,7 @@ PayPal Visual Cart is built using **Clean Architecture** and **MVVM** principles
 |                                 CORE SERVICES                                     |
 |  +───────────────────────────────+           +─────────────────────────────────+  |
 |  | Visual Product Recognition    |           | Merchant Discovery Engine       |  |
-|  | - Google Gemini 1.5 Flash     |           | - Amazon India, Flipkart        |  |
+|  | - Google Gemini 3.5 Flash Lite     |           | - Amazon India, Flipkart        |  |
 |  | - LocalProductParser (Regex)  |           | - Croma, Reliance Digital       |  |
 |  | - ProductMatchingEngine       |           | - Myntra, Tata CLiQ             |  |
 |  +---------------+---------------+           +----------------+────────────────+  |
@@ -168,7 +168,7 @@ PayPal Visual Cart is built using **Clean Architecture** and **MVVM** principles
   - Order creation (`POST /v2/checkout/orders`) with `intent: "CAPTURE"`, transparent itemized subtotal, and 18% GST calculation.
   - Idempotent order capture (`POST /v2/checkout/orders/{id}/capture`) with `PayPal-Request-Id` HTTP headers.
 - **Smart Routing Architecture**:
-  - **Path A (Integrated Partner Checkout)**: Native simulated sandbox authorization, transparent GST calculation, authorized transaction ID generation, covered by PayPal Buyer Protection.
+  - **Path A (Integrated Partner Checkout)**: Native live PayPal Sandbox Orders v2 authorization, transparent GST calculation, authorized transaction ID generation, covered by PayPal Buyer Protection.
   - **Path B (External Merchant Redirect)**: For non-integrated stores, launches Android Chrome Custom Tabs to the merchant listing with an explicit security disclaimer.
 
 ---

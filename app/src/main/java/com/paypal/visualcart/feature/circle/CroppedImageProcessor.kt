@@ -218,6 +218,17 @@ object CroppedImageProcessor {
             )
         }
 
+        // Detect full-screen black/blank buffers rendered by Android for FLAG_SECURE screens or uncaptured displays.
+        if (isLikelyBlankOrProtectedBitmap(fullFrameBitmap)) {
+            if (recycleFullFrame && !fullFrameBitmap.isRecycled) {
+                fullFrameBitmap.recycle()
+            }
+            return CropProcessingResult.Failure(
+                reason = "Protected or blank screen frame (FLAG_SECURE screens cannot be captured).",
+                isBlankOrProtectedFrame = true
+            )
+        }
+
         val clampedLeft = cropRect.left.coerceIn(0, fullFrameBitmap.width)
         val clampedTop = cropRect.top.coerceIn(0, fullFrameBitmap.height)
         val clampedRight = cropRect.right.coerceIn(0, fullFrameBitmap.width)
@@ -241,14 +252,11 @@ object CroppedImageProcessor {
 
         val safeCropped: Bitmap = cropped
 
-        if (isLikelyBlankOrProtectedBitmap(safeCropped)) {
+        if (safeCropped.width <= 0 || safeCropped.height <= 0) {
             if (!safeCropped.isRecycled && (recycleFullFrame || safeCropped !== fullFrameBitmap)) {
                 safeCropped.recycle()
             }
-            return CropProcessingResult.Failure(
-                reason = "Protected or blank screen frame (FLAG_SECURE screens cannot be captured).",
-                isBlankOrProtectedFrame = true
-            )
+            return CropProcessingResult.Failure("Selected crop has invalid dimensions.")
         }
 
         val (targetW, targetH) = computeTargetRecognitionSize(safeCropped.width, safeCropped.height)

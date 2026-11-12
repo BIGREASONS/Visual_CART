@@ -36,6 +36,7 @@ import com.paypal.visualcart.MainActivity
 import com.paypal.visualcart.R
 import com.paypal.visualcart.feature.circle.CircleToShopSessionStore
 import com.paypal.visualcart.feature.circle.OverlayCapturePreferences
+import com.paypal.visualcart.service.capture.CircleToShopCaptureService
 import com.paypal.visualcart.service.capture.CircleToShopConsentActivity
 import com.paypal.visualcart.service.tile.VisualCartTileService
 import kotlinx.coroutines.CoroutineScope
@@ -425,16 +426,24 @@ class VisualCartOverlayService : Service() {
         }
 
         // Action 0: Circle to Shop
+        val isArmed = CircleToShopSessionStore.isArmed.value
         popup.findViewById<TextView>(R.id.badge_circle_to_shop)?.apply {
+            text = if (isArmed) "ARMED" else getString(R.string.circle_to_shop_tag)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = dpToPx(6).toFloat()
-                setColor(Color.parseColor("#E8F1EC"))
+                setColor(if (isArmed) Color.parseColor("#D1E7DD") else Color.parseColor("#E8F1EC"))
             }
+            setTextColor(if (isArmed) Color.parseColor("#0F5132") else Color.parseColor("#356B57"))
         }
         popup.findViewById<View>(R.id.action_circle_to_shop)?.setOnClickListener {
             dismissCapturePopup()
-            launchCircleToShopConsent()
+            if (CircleToShopSessionStore.isArmed.value) {
+                // Pre-armed session active: trigger overlay directly without launching any Activity!
+                CircleToShopCaptureService.triggerSelectionOverlay(this)
+            } else {
+                launchCircleToShopConsent(startImmediateSelection = true)
+            }
         }
 
         // Action 1: Add from screenshot
@@ -506,9 +515,9 @@ class VisualCartOverlayService : Service() {
         startActivity(intent)
     }
 
-    private fun launchCircleToShopConsent() {
+    private fun launchCircleToShopConsent(startImmediateSelection: Boolean = true) {
         try {
-            val intent = CircleToShopConsentActivity.createLaunchIntent(this).apply {
+            val intent = CircleToShopConsentActivity.createLaunchIntent(this, startImmediateSelection).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             startActivity(intent)

@@ -1022,6 +1022,71 @@ class TestChannel3AndUniversalCartSecurity:
         )
         assert res.status_code == 400
 
+    def test_transient_503_retries_same_free_model_successfully(self, monkeypatch):
+        import asyncio as py_asyncio
+        import base64
+        import httpx
+
+        png_1x1_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        )
+
+        calls = []
+
+        class _Overloaded503:
+            status_code = 503
+            headers = {}
+            text = '{"error":{"code":503,"message":"The model is overloaded."}}'
+
+        class _Ok200:
+            status_code = 200
+            headers = {}
+
+            def json(self):
+                import json as _json
+                return {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": _json.dumps({
+                                            "brand": "NVIDIA",
+                                            "product_name": "GeForce RTX 4090",
+                                            "category": "Electronics",
+                                            "colour": "Black",
+                                            "model": "Founders Edition",
+                                            "search_query": "NVIDIA GeForce RTX 4090 Founders Edition",
+                                            "specifications": {"vram": "24GB"},
+                                            "confidence": 0.93,
+                                            "identification_status": "IDENTIFIED",
+                                        })
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+
+        async def _fake_post_503_then_200(self, url, json=None, headers=None):
+            calls.append(url)
+            return _Overloaded503() if len(calls) == 1 else _Ok200()
+
+        async def _fast_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post_503_then_200)
+        monkeypatch.setattr(py_asyncio, "sleep", _fast_sleep)
+
+        gemini = GeminiClient(api_key="AIzaSyFakeTestKey1234567890")
+        res = asyncio.run(gemini.understand_product(image_base64=png_1x1_b64, mime_type="image/png"))
+        assert len(calls) == 2
+        assert all("gemini-3.5-flash-lite" in u for u in calls)
+        assert res["status"] == "IDENTIFIED"
+        assert res["recognition_source"] == "LIVE_AI"
+        assert res["api_requests_made"] == 2
+
+
 
 
 

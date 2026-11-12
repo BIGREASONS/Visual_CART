@@ -608,4 +608,147 @@ class CircleToShopPipelineTest {
         assertTrue(OverlayCapturePreferences.shouldShowFirstTimeDisclosure(disclosureAcknowledged = false))
         assertFalse(OverlayCapturePreferences.shouldShowFirstTimeDisclosure(disclosureAcknowledged = true))
     }
+
+    @Test
+    fun testPreArmedSessionLifecycleAndRepeatedCapturesWithoutConsentPrompt() {
+        val coordinator = CircleCaptureSessionCoordinator(CircleToShopSessionStore)
+        val grantId = CircleToShopSessionStore.storeSingleUseGrant(resultCode = -1, data = Intent())
+
+        // 1. Pre-arm session from UniCart without immediate selection
+        val started = coordinator.startSession(grantId, startImmediateSelection = false)
+        assertTrue("Expected pre-armed session initialization to succeed", started)
+        assertEquals(CircleProjectionState.ARMED, coordinator.currentState)
+        assertTrue(coordinator.isArmed)
+        assertEquals(1L, coordinator.sessionId)
+        assertEquals(0, coordinator.captureCount)
+
+        // 2. Register callback then create the single VirtualDisplay
+        assertTrue(coordinator.registerProjectionCallback())
+        assertTrue(coordinator.recordVirtualDisplayCreated())
+        assertEquals(1, coordinator.virtualDisplayCreatedCount)
+
+        // 3. User switches to Instagram Reels / YouTube Shorts (video playing).
+        // First Circle: User taps floating bubble -> triggers selection directly without Activity launch
+        assertTrue(coordinator.triggerSelection())
+        assertEquals(CircleProjectionState.SELECTING, coordinator.currentState)
+        assertTrue(CircleToShopSessionStore.isBubbleHiddenForCapture.value)
+
+        // Gesture confirmed, overlay hidden -> request frame capture
+        assertTrue(coordinator.requestFrameCapture())
+        assertEquals(CircleProjectionState.CAPTURING, coordinator.currentState)
+        assertTrue(coordinator.isAwaitingFrameCapture)
+
+        // Frame acquired -> handoff to VisualCartShareActivity -> return to ARMED
+        assertTrue(coordinator.onFrameAcquired())
+        assertEquals(1, coordinator.captureCount)
+        assertFalse(coordinator.isAwaitingFrameCapture)
+
+        assertTrue(coordinator.returnToArmedAfterCapture())
+        assertEquals(CircleProjectionState.ARMED, coordinator.currentState)
+        assertTrue(coordinator.isArmed)
+        assertFalse(CircleToShopSessionStore.isBubbleHiddenForCapture.value)
+        assertEquals(1, coordinator.virtualDisplayCreatedCount) // Single VirtualDisplay reused!
+
+        // 4. Second Circle: User closes share sheet, returns to video (still playing!), taps bubble again
+        // NO consent prompt, NO Activity launch, NO new VirtualDisplay!
+        assertTrue(coordinator.triggerSelection())
+        assertEquals(CircleProjectionState.SELECTING, coordinator.currentState)
+        assertTrue(coordinator.requestFrameCapture())
+        assertEquals(CircleProjectionState.CAPTURING, coordinator.currentState)
+        assertTrue(coordinator.onFrameAcquired())
+        assertEquals(2, coordinator.captureCount)
+        assertTrue(coordinator.returnToArmedAfterCapture())
+        assertEquals(CircleProjectionState.ARMED, coordinator.currentState)
+        assertEquals(1, coordinator.virtualDisplayCreatedCount)
+
+        // 5. Third Circle: User starts drawing, then taps Cancel
+        assertTrue(coordinator.triggerSelection())
+        assertEquals(CircleProjectionState.SELECTING, coordinator.currentState)
+        assertTrue(coordinator.cancelSelection())
+        assertEquals(CircleProjectionState.ARMED, coordinator.currentState)
+        assertTrue(coordinator.isArmed)
+        assertFalse(CircleToShopSessionStore.isBubbleHiddenForCapture.value)
+
+        // 6. User taps Stop capture in ongoing notification or disables switch in HomeScreen
+        coordinator.stopSession("User stop")
+        assertEquals(CircleProjectionState.IDLE, coordinator.currentState)
+        assertFalse(coordinator.isArmed)
+        assertFalse(CircleToShopSessionStore.isBubbleHiddenForCapture.value)
+    }
+
+    @Test
+    fun testSingleVirtualDisplayCreationEnforced() {
+        val coordinator = CircleCaptureSessionCoordinator(CircleToShopSessionStore)
+        val grantId = CircleToShopSessionStore.storeSingleUseGrant(resultCode = -1, data = Intent())
+        coordinator.startSession(grantId, startImmediateSelection = false)
+
+        // Attempting to create VirtualDisplay before callback registration MUST fail
+        try {
+            coordinator.recordVirtualDisplayCreated()
+            fail("Expected IllegalStateException when VirtualDisplay created before callback")
+        } catch (_: IllegalStateException) {
+            // Expected
+        }
+
+        // Register callback first
+        assertTrue(coordinator.registerProjectionCallback())
+
+        // First creation succeeds
+        assertTrue(coordinator.recordVirtualDisplayCreated())
+        assertEquals(1, coordinator.virtualDisplayCreatedCount)
+
+        // Android MediaProjection restriction: Never call createVirtualDisplay more than once on the same instance
+        try {
+            coordinator.recordVirtualDisplayCreated()
+            fail("Expected IllegalStateException on duplicate VirtualDisplay creation within one session")
+        } catch (_: IllegalStateException) {
+            // Expected
+        }
+    }
+
+    @Test
+    fun testExternalProjectionRevocationCleansUpArmedSession() {
+        val coordinator = CircleCaptureSessionCoordinator(CircleToShopSessionStore)
+        val grantId = CircleToShopSessionStore.storeSingleUseGrant(resultCode = -1, data = Intent())
+        coordinator.startSession(grantId, startImmediateSelection = false)
+        coordinator.registerProjectionCallback()
+        coordinator.recordVirtualDisplayCreated()
+
+        assertTrue(coordinator.isArmed)
+        assertEquals(CircleProjectionState.ARMED, coordinator.currentState)
+
+        // System or status-bar revocation occurs
+        coordinator.onProjectionRevoked()
+
+        assertEquals(CircleProjectionState.IDLE, coordinator.currentState)
+        assertFalse(coordinator.isArmed)
+        assertFalse(coordinator.isAwaitingFrameCapture)
+        assertEquals(0, coordinator.virtualDisplayCreatedCount)
+    }
+
+    @Test
+    fun testBufferDrainingVsActiveCaptureFrameAcquisition() {
+        val coordinator = CircleCaptureSessionCoordinator(CircleToShopSessionStore)
+        val grantId = CircleToShopSessionStore.storeSingleUseGrant(resultCode = -1, data = Intent())
+        coordinator.startSession(grantId, startImmediateSelection = false)
+        coordinator.registerProjectionCallback()
+        coordinator.recordVirtualDisplayCreated()
+
+        // In ARMED state, buffer listener drains frames immediately (isAwaitingFrameCapture == false)
+        assertFalse(coordinator.isAwaitingFrameCapture)
+        assertFalse(coordinator.onFrameAcquired()) // Cannot claim frame when not actively capturing
+
+        // Enter selection
+        coordinator.triggerSelection()
+        assertFalse(coordinator.isAwaitingFrameCapture)
+
+        // Confirm circle gesture
+        coordinator.requestFrameCapture()
+        assertTrue(coordinator.isAwaitingFrameCapture)
+
+        // Exactly one frame acquisition succeeds
+        assertTrue(coordinator.onFrameAcquired())
+        assertFalse(coordinator.isAwaitingFrameCapture)
+        assertFalse("Subsequent buffer must not be claimed as a capture", coordinator.onFrameAcquired())
+    }
 }

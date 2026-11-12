@@ -14,6 +14,7 @@ import java.util.concurrent.ConcurrentHashMap
 enum class CircleProjectionState {
     IDLE,
     REQUESTING_CONSENT,
+    ARMED,
     SELECTING,
     CAPTURING,
     REVOKED_OR_DENIED
@@ -49,6 +50,9 @@ object CircleToShopSessionStore {
     private val _state = MutableStateFlow(CircleProjectionState.IDLE)
     val state: StateFlow<CircleProjectionState> = _state.asStateFlow()
 
+    private val _isArmed = MutableStateFlow(false)
+    val isArmed: StateFlow<Boolean> = _isArmed.asStateFlow()
+
     private val _isBubbleHiddenForCapture = MutableStateFlow(false)
     val isBubbleHiddenForCapture: StateFlow<Boolean> = _isBubbleHiddenForCapture.asStateFlow()
 
@@ -58,6 +62,9 @@ object CircleToShopSessionStore {
 
     fun updateState(newState: CircleProjectionState) {
         _state.value = newState
+        _isArmed.value = newState == CircleProjectionState.ARMED ||
+            newState == CircleProjectionState.SELECTING ||
+            newState == CircleProjectionState.CAPTURING
     }
 
     fun markBubbleHiddenForCapture(hidden: Boolean) {
@@ -139,6 +146,7 @@ object CircleToShopSessionStore {
         }
         croppedArtifacts.clear()
         _isBubbleHiddenForCapture.value = false
+        _isArmed.value = false
         _state.value = CircleProjectionState.IDLE
     }
 }

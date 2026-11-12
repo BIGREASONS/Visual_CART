@@ -104,8 +104,7 @@
         <activity
             android:name=".service.capture.CircleToShopConsentActivity"
             android:theme="@style/Theme.VisualCart.Dialog"
-            android:exported="false"
-            android:excludeFromRecents="true" />
+            android:exported="false" />
 
         <!-- Quick Settings Tile Service -->
         <service
